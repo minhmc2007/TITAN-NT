@@ -11,6 +11,9 @@
 #define PING_ROUNDS 20000
 #define MULTI_ITERS 200000
 
+/* Spin budget before blocking. Tuned on device, not derived. */
+#define SPIN_ITERS 4000
+
 struct shared_ping {
   alignas(64) uint32_t req;
   alignas(64) uint32_t req_epoch;
@@ -19,6 +22,8 @@ struct shared_ping {
   alignas(64) uint32_t stop;
   alignas(64) uint32_t child_seen;
   alignas(64) uint32_t child_waiting;
+  alignas(64) uint32_t child_waits;
+  alignas(64) uint32_t child_timeouts;
 };
 
 struct shared_multi {
@@ -43,14 +48,6 @@ static long shared_page(void) {
   return p;
 }
 
-static void pin_cpu(int cpu) {
-  unsigned char mask[128];
-  for (size_t i = 0; i < sizeof(mask); i++)
-    mask[i] = 0;
-  mask[cpu / 8] = (unsigned char)(1u << (cpu % 8));
-  titan_sched_setaffinity(0, sizeof(mask), mask);
-}
-
 static int wait_eq(uint32_t *word, uint32_t expect, uint64_t timeout_ns) {
   struct titan_timespec ts;
   for (;;) {
@@ -68,10 +65,23 @@ static int wait_eq(uint32_t *word, uint32_t expect, uint64_t timeout_ns) {
   }
 }
 
-static int wait_change(uint32_t *word, uint32_t seen, uint64_t timeout_ns) {
+/* A peer that answers within a few microseconds never needs a context switch. */
+static int spin_changed(uint32_t *word, uint32_t seen, uint32_t iters) {
+  for (uint32_t i = 0; i < iters; i++) {
+    if (__atomic_load_n(word, __ATOMIC_ACQUIRE) != seen)
+      return 1;
+    __asm__ volatile("yield" ::: "memory");
+  }
+  return 0;
+}
+
+static int wait_change(uint32_t *word, uint32_t seen, uint64_t timeout_ns,
+                       uint32_t spin) {
   uint64_t end = titan_monotonic_ns() + timeout_ns;
   for (;;) {
     if (__atomic_load_n(word, __ATOMIC_ACQUIRE) != seen)
+      return 0;
+    if (spin_changed(word, seen, spin))
       return 0;
     uint64_t now = titan_monotonic_ns();
     if (now >= end)
@@ -86,17 +96,34 @@ static void wake_all(uint32_t *word) {
   titan_futex(word, TITAN_FUTEX_WAKE, 0x7fffffffu, 0, 0, 0);
 }
 
-static void child_futex(struct shared_ping *p) {
+static void child_wait(struct shared_ping *p, uint32_t seen, uint32_t spin) {
+  for (;;) {
+    if (__atomic_load_n(&p->stop, __ATOMIC_ACQUIRE))
+      titan_exit_group(0);
+    if (__atomic_load_n(&p->req_epoch, __ATOMIC_ACQUIRE) != seen)
+      break;
+    __atomic_store_n(&p->child_seen, seen, __ATOMIC_RELAXED);
+    __atomic_store_n(&p->child_waiting, 1, __ATOMIC_RELAXED);
+    if (spin_changed(&p->req_epoch, seen, spin))
+      break;
+    __atomic_add_fetch(&p->child_waits, 1, __ATOMIC_RELAXED);
+    struct titan_timespec ts;
+    titan_deadline_ns(&ts, 2000000000ull);
+    long r = titan_futex(&p->req_epoch, TITAN_FUTEX_WAIT_BITSET, seen, &ts, 0,
+                         TITAN_FUTEX_BITSET_MATCH_ANY);
+    if (r == 0 || -r == EAGAIN_)
+      continue;
+    __atomic_add_fetch(&p->child_timeouts, 1, __ATOMIC_RELAXED);
+    if (-r != ETIMEDOUT_)
+      titan_exit_group(2);
+  }
+  __atomic_store_n(&p->child_waiting, 0, __ATOMIC_RELAXED);
+}
+
+static void child_futex(struct shared_ping *p, uint32_t spin) {
   uint32_t seen = 0;
   for (;;) {
-    while (__atomic_load_n(&p->req_epoch, __ATOMIC_ACQUIRE) == seen) {
-      if (__atomic_load_n(&p->stop, __ATOMIC_ACQUIRE))
-        titan_exit_group(0);
-      __atomic_store_n(&p->child_seen, seen, __ATOMIC_RELAXED);
-      __atomic_store_n(&p->child_waiting, 1, __ATOMIC_RELAXED);
-      wait_eq(&p->req_epoch, seen, 2000000000ull);
-      __atomic_store_n(&p->child_waiting, 0, __ATOMIC_RELAXED);
-    }
+    child_wait(p, seen, spin);
     if (__atomic_load_n(&p->stop, __ATOMIC_ACQUIRE))
       titan_exit_group(0);
     seen = __atomic_load_n(&p->req_epoch, __ATOMIC_ACQUIRE);
@@ -131,14 +158,17 @@ static uint64_t loadavg_x100(void) {
   return whole * 100 + frac;
 }
 
-static int bench_futex(struct shared_ping *p, uint64_t *elapsed_ns) {
+static int bench_futex(struct shared_ping *p, uint32_t spin, const char *name,
+                       uint64_t *elapsed_ns) {
   uint64_t failures = 0, stalls = 0, max_stall_ns = 0;
   uint64_t stall_entry = 0, stall_wait = 0;
-  uint32_t stall_req_epoch = 0, stall_ack_epoch = 0, stall_ack = 0;
-  uint32_t stall_seen = 0, stall_waiting = 0;
+  uint32_t stall_seen = 0, stall_waiting = 0, stall_waits = 0,
+           stall_timeouts = 0;
   uint64_t t0 = titan_monotonic_ns();
   for (uint32_t i = 0; i < PING_ROUNDS; i++) {
     uint64_t round0 = titan_monotonic_ns();
+    uint32_t waits0 = __atomic_load_n(&p->child_waits, __ATOMIC_RELAXED);
+    uint32_t timeouts0 = __atomic_load_n(&p->child_timeouts, __ATOMIC_RELAXED);
     __atomic_store_n(&p->req, i, __ATOMIC_RELEASE);
     __atomic_add_fetch(&p->req_epoch, 1, __ATOMIC_RELEASE);
     wake_all(&p->req_epoch);
@@ -146,17 +176,19 @@ static int bench_futex(struct shared_ping *p, uint64_t *elapsed_ns) {
     while (__atomic_load_n(&p->ack_epoch, __ATOMIC_ACQUIRE) < i + 1) {
       uint32_t seen = __atomic_load_n(&p->ack_epoch, __ATOMIC_ACQUIRE);
       uint64_t now = titan_monotonic_ns();
-      if (now >= limit || wait_change(&p->ack_epoch, seen, limit - now) != 0) {
+      if (now >= limit ||
+          wait_change(&p->ack_epoch, seen, limit - now, spin) != 0) {
         stalls++;
         if (now >= limit)
           stall_entry++;
         else
           stall_wait++;
-        stall_req_epoch = __atomic_load_n(&p->req_epoch, __ATOMIC_RELAXED);
-        stall_ack_epoch = __atomic_load_n(&p->ack_epoch, __ATOMIC_RELAXED);
-        stall_ack = __atomic_load_n(&p->ack, __ATOMIC_RELAXED);
         stall_seen = __atomic_load_n(&p->child_seen, __ATOMIC_RELAXED);
         stall_waiting = __atomic_load_n(&p->child_waiting, __ATOMIC_RELAXED);
+        stall_waits = __atomic_load_n(&p->child_waits, __ATOMIC_RELAXED) -
+                      waits0;
+        stall_timeouts = __atomic_load_n(&p->child_timeouts, __ATOMIC_RELAXED) -
+                         timeouts0;
         uint64_t took = titan_monotonic_ns() - round0;
         if (took > max_stall_ns)
           max_stall_ns = took;
@@ -171,10 +203,11 @@ static int bench_futex(struct shared_ping *p, uint64_t *elapsed_ns) {
   wake_all(&p->req_epoch);
 
   struct titan_buf b;
-  char storage[320];
+  char storage[512];
   titan_buf_init(&b, storage, sizeof(storage));
-  titan_buf_str(&b, "{\"test\":\"ipc_bench\",\"variant\":\"futex_bitset\""
-                     ",\"roundtrips\":");
+  titan_buf_str(&b, "{\"test\":\"ipc_bench\",\"variant\":\"");
+  titan_buf_str(&b, name);
+  titan_buf_str(&b, "\",\"roundtrips\":");
   titan_buf_u64(&b, PING_ROUNDS);
   titan_buf_str(&b, ",\"total_us\":");
   titan_buf_u64(&b, elapsed / 1000);
@@ -186,22 +219,20 @@ static int bench_futex(struct shared_ping *p, uint64_t *elapsed_ns) {
   titan_buf_u64(&b, stalls);
   titan_buf_str(&b, ",\"max_stall_us\":");
   titan_buf_u64(&b, max_stall_ns / 1000);
-  titan_buf_str(&b, ",\"loadavg_x100\":");
-  titan_buf_u64(&b, loadavg_x100());
   titan_buf_str(&b, ",\"stall_entry\":");
   titan_buf_u64(&b, stall_entry);
   titan_buf_str(&b, ",\"stall_wait\":");
   titan_buf_u64(&b, stall_wait);
-  titan_buf_str(&b, ",\"stall_req_epoch\":");
-  titan_buf_u64(&b, stall_req_epoch);
-  titan_buf_str(&b, ",\"stall_ack_epoch\":");
-  titan_buf_u64(&b, stall_ack_epoch);
-  titan_buf_str(&b, ",\"stall_ack\":");
-  titan_buf_u64(&b, stall_ack);
-  titan_buf_str(&b, ",\"stall_seen\":");
+  titan_buf_str(&b, ",\"stall_child_seen\":");
   titan_buf_u64(&b, stall_seen);
-  titan_buf_str(&b, ",\"stall_waiting\":");
+  titan_buf_str(&b, ",\"stall_child_waiting\":");
   titan_buf_u64(&b, stall_waiting);
+  titan_buf_str(&b, ",\"stall_child_waits\":");
+  titan_buf_u64(&b, stall_waits);
+  titan_buf_str(&b, ",\"stall_child_timeouts\":");
+  titan_buf_u64(&b, stall_timeouts);
+  titan_buf_str(&b, ",\"loadavg_x100\":");
+  titan_buf_u64(&b, loadavg_x100());
   titan_buf_str(&b, "}");
   titan_buf_emit(&b);
   *elapsed_ns = elapsed;
@@ -277,7 +308,7 @@ static int bench_multi(struct shared_multi *m) {
       if (sum >= target)
         break;
       uint32_t seen = __atomic_load_n(&m->epoch, __ATOMIC_ACQUIRE);
-      if (wait_change(&m->epoch, seen, 10000000000ull) != 0) {
+      if (wait_change(&m->epoch, seen, 10000000000ull, 0) != 0) {
         failures++;
         break;
       }
@@ -373,43 +404,45 @@ static int probe_timeout(void) {
   return err == ETIMEDOUT_ ? 0 : -1;
 }
 
-int main(void) {
-  long ping_page = shared_page();
-  long multi_page = shared_page();
-  if (ping_page < 0 || multi_page < 0) {
+static int run_ping(uint32_t spin, const char *name, uint64_t *elapsed_ns) {
+  long page = shared_page();
+  if (page < 0) {
     titan_write_str(2, "mmap failed\n");
-    return 1;
+    return -1;
   }
-  struct shared_ping *p = (struct shared_ping *)(uintptr_t)ping_page;
-  struct shared_multi *m = (struct shared_multi *)(uintptr_t)multi_page;
-
-  pin_cpu(0);
-
-  int rc = 0;
+  struct shared_ping *p = (struct shared_ping *)(uintptr_t)page;
   long pid = titan_clone_fork();
   if (pid == 0) {
-    pin_cpu(1);
-    child_futex(p);
+    child_futex(p, spin);
     titan_exit_group(0);
   }
   if (pid < 0) {
     titan_write_str(2, "fork failed\n");
-    return 1;
+    titan_munmap((void *)(uintptr_t)page, 4096);
+    return -1;
   }
-  uint64_t futex_ns = 0;
-  if (bench_futex(p, &futex_ns) != 0)
-    rc = 1;
+  int rc = bench_futex(p, spin, name, elapsed_ns);
   int status = 0;
   titan_wait4(pid, &status, 0);
+  titan_munmap((void *)(uintptr_t)page, 4096);
+  return rc;
+}
+
+int main(void) {
+  int rc = 0;
+  uint64_t block_ns = 0, spin_ns = 0, socket_ns = 0;
+  if (run_ping(0, "futex_block", &block_ns) != 0)
+    rc = 1;
+  if (run_ping(SPIN_ITERS, "futex_spin", &spin_ns) != 0)
+    rc = 1;
 
   int sv[2];
   if (titan_socketpair(1, 1, 0, sv) != 0) {
     titan_write_str(2, "socketpair failed\n");
     return 1;
   }
-  pid = titan_clone_fork();
+  long pid = titan_clone_fork();
   if (pid == 0) {
-    pin_cpu(1);
     titan_close(sv[0]);
     child_socket(sv[1]);
     titan_exit_group(0);
@@ -418,28 +451,37 @@ int main(void) {
     titan_write_str(2, "fork failed\n");
     return 1;
   }
-  uint64_t socket_ns = 0;
   if (bench_socket(sv[0], &socket_ns) != 0)
     rc = 1;
   titan_close(sv[0]);
   titan_close(sv[1]);
+  int status = 0;
   titan_wait4(pid, &status, 0);
 
   struct titan_buf ratio;
-  char ratio_storage[256];
+  char ratio_storage[320];
   titan_buf_init(&ratio, ratio_storage, sizeof(ratio_storage));
-  titan_buf_str(&ratio, "{\"test\":\"ipc_compare\",\"futex_ns\":");
-  titan_buf_u64(&ratio, futex_ns / PING_ROUNDS);
+  titan_buf_str(&ratio, "{\"test\":\"ipc_compare\",\"block_ns\":");
+  titan_buf_u64(&ratio, block_ns / PING_ROUNDS);
+  titan_buf_str(&ratio, ",\"spin_ns\":");
+  titan_buf_u64(&ratio, spin_ns / PING_ROUNDS);
   titan_buf_str(&ratio, ",\"socket_ns\":");
   titan_buf_u64(&ratio, socket_ns / PING_ROUNDS);
-  titan_buf_str(&ratio, ",\"speedup_x100\":");
-  titan_buf_u64(&ratio, futex_ns ? socket_ns * 100 / futex_ns : 0);
+  titan_buf_str(&ratio, ",\"block_x100\":");
+  titan_buf_u64(&ratio, block_ns ? socket_ns * 100 / block_ns : 0);
+  titan_buf_str(&ratio, ",\"spin_x100\":");
+  titan_buf_u64(&ratio, spin_ns ? socket_ns * 100 / spin_ns : 0);
   titan_buf_str(&ratio, "}");
   titan_buf_emit(&ratio);
 
+  long multi_page = shared_page();
+  if (multi_page < 0) {
+    titan_write_str(2, "mmap failed\n");
+    return 1;
+  }
+  struct shared_multi *m = (struct shared_multi *)(uintptr_t)multi_page;
   pid = titan_clone_fork();
   if (pid == 0) {
-    pin_cpu(1);
     child_multi(m);
     titan_exit_group(0);
   }
