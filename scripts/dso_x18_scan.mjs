@@ -2,9 +2,9 @@
 // SCS keeps its pointer in x18, the register ARM64EC needs for the TEB.
 import { readFileSync } from 'node:fs';
 
-const SCS_PUSH = 0xf8008e52; // str x18, [x18], #8
-const SCS_POP_PRE = 0xf81f8e52; // ldr x18, [x18, #-8]!
-const SCS_POP_POST = 0xf81f8652; // ldr x18, [x18], #-8
+const SCS_PUSH = 0xf8008652; // str x18, [x18], #8
+const SCS_POP_PRE = 0xf85f8e52; // ldr x18, [x18, #-8]!
+const SCS_POP_POST = 0xf85f8652; // ldr x18, [x18], #-8
 
 const PT_LOAD = 1;
 const PF_X = 1;
