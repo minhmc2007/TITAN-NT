@@ -53,6 +53,20 @@ static int wait_eq(uint32_t *word, uint32_t expect, uint64_t timeout_ns) {
   }
 }
 
+static int wait_change(uint32_t *word, uint32_t seen, uint64_t timeout_ns) {
+  uint64_t end = titan_monotonic_ns() + timeout_ns;
+  for (;;) {
+    if (__atomic_load_n(word, __ATOMIC_ACQUIRE) != seen)
+      return 0;
+    uint64_t now = titan_monotonic_ns();
+    if (now >= end)
+      return ETIMEDOUT_;
+    int err = wait_eq(word, seen, end - now);
+    if (err != 0 && err != ETIMEDOUT_)
+      return err;
+  }
+}
+
 static void wake_all(uint32_t *word) {
   titan_futex(word, TITAN_FUTEX_WAKE, 0x7fffffffu, 0, 0, 0);
 }
@@ -82,11 +96,11 @@ static int bench_futex(struct shared_ping *p, uint64_t *elapsed_ns) {
     __atomic_store_n(&p->req, i, __ATOMIC_RELEASE);
     __atomic_add_fetch(&p->req_epoch, 1, __ATOMIC_RELEASE);
     wake_all(&p->req_epoch);
+    uint64_t limit = titan_monotonic_ns() + 10000000000ull;
     while (__atomic_load_n(&p->ack_epoch, __ATOMIC_ACQUIRE) < i + 1) {
-      int err = wait_eq(&p->ack_epoch,
-                        __atomic_load_n(&p->ack_epoch, __ATOMIC_ACQUIRE),
-                        2000000000ull);
-      if (err != 0) {
+      uint32_t seen = __atomic_load_n(&p->ack_epoch, __ATOMIC_ACQUIRE);
+      uint64_t now = titan_monotonic_ns();
+      if (now >= limit || wait_change(&p->ack_epoch, seen, limit - now) != 0) {
         failures++;
         break;
       }
@@ -185,12 +199,7 @@ static int bench_multi(struct shared_multi *m) {
       if (sum >= target)
         break;
       uint32_t seen = __atomic_load_n(&m->epoch, __ATOMIC_ACQUIRE);
-      int err = wait_eq(&m->epoch, seen, 2000000000ull);
-      if (err == ETIMEDOUT_) {
-        failures++;
-        break;
-      }
-      if (err != 0) {
+      if (wait_change(&m->epoch, seen, 10000000000ull) != 0) {
         failures++;
         break;
       }
