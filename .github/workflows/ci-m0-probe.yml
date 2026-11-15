@@ -1,0 +1,70 @@
+name: ci-m0-probe
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-m0-probe-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate scripts
+        run: |
+          set -euo pipefail
+          bash -n scripts/probe_device.sh
+          node --check scripts/dso_x18_scan.mjs
+          node scripts/dso_x18_scan.mjs --self-test
+
+      - name: Locate NDK
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          candidates=()
+          for d in /usr/local/lib/android/sdk/ndk/*; do
+            v="$(basename "$d")"
+            major="${v%%.*}"
+            if [ "$major" -ge 27 ] && [ -x "$d/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" ]; then
+              candidates+=("$v")
+            fi
+          done
+          [ "${#candidates[@]}" -gt 0 ] || { echo "no NDK >= r27 on runner"; exit 1; }
+          version="$(printf '%s\n' "${candidates[@]}" | sort -V | tail -1)"
+          echo "NDK=/usr/local/lib/android/sdk/ndk/$version" >> "$GITHUB_ENV"
+          echo "using NDK $version"
+
+      - name: Build m0_probe
+        run: |
+          set -euo pipefail
+          mkdir -p dist/m0_probe
+          cc="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android34-clang"
+          "$cc" -O2 -g -Wall -Wextra -Werror \
+            -ffixed-x18 -fno-sanitize=shadow-call-stack \
+            -march=armv8.2-a+lse \
+            -o dist/m0_probe/m0_probe native/tools/m0_probe/m0_probe.c
+          "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" \
+            -h dist/m0_probe/m0_probe
+
+      - name: Assert no SCS prologues in self-built binary
+        run: node scripts/dso_x18_scan.mjs --expect-zero dist/m0_probe/m0_probe
+
+      - name: Checksums
+        run: |
+          set -euo pipefail
+          cd dist/m0_probe
+          sha256sum m0_probe > m0_probe.sha256
+          cat m0_probe.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: m0-probe-arm64
+          path: dist/m0_probe/
+          if-no-files-found: error
+          retention-days: 30
