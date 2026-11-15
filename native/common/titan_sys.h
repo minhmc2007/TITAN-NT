@@ -29,6 +29,9 @@
 #define TITAN_SYS_wait4 260
 #define TITAN_SYS_memfd_create 279
 #define TITAN_SYS_futex_waitv 449
+#define TITAN_SYS_futex_wake 454
+#define TITAN_SYS_futex_wait 455
+#define TITAN_SYS_futex_requeue 456
 
 #define TITAN_FUTEX_WAIT 0
 #define TITAN_FUTEX_WAKE 1

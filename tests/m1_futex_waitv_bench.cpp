@@ -11,8 +11,8 @@
 #define PING_ROUNDS 20000
 #define MULTI_ITERS 200000
 
-/* Covers a peer turnaround of roughly 20 us before blocking. */
-#define SPIN_ITERS 20000
+/* Spin budget before blocking, in nanoseconds. */
+#define SPIN_NS 2000
 
 struct shared_ping {
   alignas(64) uint32_t req;
@@ -65,23 +65,59 @@ static int wait_eq(uint32_t *word, uint32_t expect, uint64_t timeout_ns) {
   }
 }
 
-/* A peer that answers within a few microseconds never needs a context switch. */
-static int spin_changed(uint32_t *word, uint32_t seen, uint32_t iters) {
-  for (uint32_t i = 0; i < iters; i++) {
-    if (__atomic_load_n(word, __ATOMIC_ACQUIRE) != seen)
+static uint64_t cntvct(void) {
+  uint64_t v;
+  __asm__ volatile("mrs %0, cntvct_el0" : "=r"(v));
+  return v;
+}
+
+/* Wall time per tick is fixed, so the budget does not stretch on slow cores. */
+static uint64_t spin_ticks(uint64_t budget_ns) {
+  uint64_t freq;
+  __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(freq));
+  if (freq == 0 || freq > 1000000000ull)
+    return 0;
+  return budget_ns * freq / 1000000000ull;
+}
+
+/* A peer that answers within the budget never needs a context switch. In WFE
+   mode the exclusive load arms the monitor so a remote store ends the wait
+   instead of the event stream doing it. */
+static int spin_changed(uint32_t *word, uint32_t seen, uint64_t ticks,
+                        int wfe) {
+  if (ticks == 0)
+    return 0;
+  uint64_t end = cntvct() + ticks;
+  for (;;) {
+    if (!wfe) {
+      if (__atomic_load_n(word, __ATOMIC_ACQUIRE) != seen)
+        return 1;
+      if (cntvct() >= end)
+        return 0;
+      __asm__ volatile("yield" ::: "memory");
+      continue;
+    }
+    uint32_t v;
+    __asm__ volatile("ldaxr %w0, [%1]" : "=&r"(v) : "r"(word) : "memory");
+    if (v != seen) {
+      __asm__ volatile("clrex" ::: "memory");
       return 1;
-    __asm__ volatile("yield" ::: "memory");
+    }
+    if (cntvct() >= end) {
+      __asm__ volatile("clrex" ::: "memory");
+      return 0;
+    }
+    __asm__ volatile("wfe" ::: "memory");
   }
-  return 0;
 }
 
 static int wait_change(uint32_t *word, uint32_t seen, uint64_t timeout_ns,
-                       uint32_t spin) {
+                       uint64_t spin, int wfe) {
   uint64_t end = titan_monotonic_ns() + timeout_ns;
   for (;;) {
     if (__atomic_load_n(word, __ATOMIC_ACQUIRE) != seen)
       return 0;
-    if (spin_changed(word, seen, spin))
+    if (spin_changed(word, seen, spin, wfe))
       return 0;
     uint64_t now = titan_monotonic_ns();
     if (now >= end)
@@ -96,7 +132,8 @@ static void wake_all(uint32_t *word) {
   titan_futex(word, TITAN_FUTEX_WAKE, 0x7fffffffu, 0, 0, 0);
 }
 
-static void child_wait(struct shared_ping *p, uint32_t seen, uint32_t spin) {
+static void child_wait(struct shared_ping *p, uint32_t seen, uint64_t spin,
+                       int wfe) {
   for (;;) {
     if (__atomic_load_n(&p->stop, __ATOMIC_ACQUIRE))
       titan_exit_group(0);
@@ -104,7 +141,7 @@ static void child_wait(struct shared_ping *p, uint32_t seen, uint32_t spin) {
       break;
     __atomic_store_n(&p->child_seen, seen, __ATOMIC_RELAXED);
     __atomic_store_n(&p->child_waiting, 1, __ATOMIC_RELAXED);
-    if (spin_changed(&p->req_epoch, seen, spin))
+    if (spin_changed(&p->req_epoch, seen, spin, wfe))
       break;
     __atomic_add_fetch(&p->child_waits, 1, __ATOMIC_RELAXED);
     struct titan_timespec ts;
@@ -120,10 +157,10 @@ static void child_wait(struct shared_ping *p, uint32_t seen, uint32_t spin) {
   __atomic_store_n(&p->child_waiting, 0, __ATOMIC_RELAXED);
 }
 
-static void child_futex(struct shared_ping *p, uint32_t spin) {
+static void child_futex(struct shared_ping *p, uint64_t spin, int wfe) {
   uint32_t seen = 0;
   for (;;) {
-    child_wait(p, seen, spin);
+    child_wait(p, seen, spin, wfe);
     if (__atomic_load_n(&p->stop, __ATOMIC_ACQUIRE))
       titan_exit_group(0);
     seen = __atomic_load_n(&p->req_epoch, __ATOMIC_ACQUIRE);
@@ -158,8 +195,8 @@ static uint64_t loadavg_x100(void) {
   return whole * 100 + frac;
 }
 
-static int bench_futex(struct shared_ping *p, uint32_t spin, const char *name,
-                       uint64_t *elapsed_ns) {
+static int bench_futex(struct shared_ping *p, uint64_t spin, int wfe,
+                       const char *name, uint64_t *elapsed_ns) {
   uint64_t failures = 0, stalls = 0, max_stall_ns = 0;
   uint64_t stall_entry = 0, stall_wait = 0;
   uint32_t stall_seen = 0, stall_waiting = 0, stall_waits = 0,
@@ -177,7 +214,7 @@ static int bench_futex(struct shared_ping *p, uint32_t spin, const char *name,
       uint32_t seen = __atomic_load_n(&p->ack_epoch, __ATOMIC_ACQUIRE);
       uint64_t now = titan_monotonic_ns();
       if (now >= limit ||
-          wait_change(&p->ack_epoch, seen, limit - now, spin) != 0) {
+          wait_change(&p->ack_epoch, seen, limit - now, spin, wfe) != 0) {
         stalls++;
         if (now >= limit)
           stall_entry++;
@@ -308,7 +345,7 @@ static int bench_multi(struct shared_multi *m) {
       if (sum >= target)
         break;
       uint32_t seen = __atomic_load_n(&m->epoch, __ATOMIC_ACQUIRE);
-      if (wait_change(&m->epoch, seen, 10000000000ull, 0) != 0) {
+      if (wait_change(&m->epoch, seen, 10000000000ull, 0, 0) != 0) {
         failures++;
         break;
       }
@@ -334,12 +371,9 @@ static int bench_multi(struct shared_multi *m) {
   return failures == 0 ? 0 : -1;
 }
 
-/* 449 is SIGSYS under untrusted_app, so it must die in a child. */
-static void probe_waitv(void) {
-  long page = titan_mmap(0, 4096, TITAN_PROT_READ | TITAN_PROT_WRITE,
-                         TITAN_MAP_PRIVATE | TITAN_MAP_ANONYMOUS, -1, 0);
-  if (page < 0)
-    return;
+/* 449 and 454-456 are SIGSYS under untrusted_app, so each probe dies in its
+   own child; classic futex stays the kernel wait path. */
+static void probe_syscall(long nr, long page) {
   struct shared_ping *p = (struct shared_ping *)(uintptr_t)page;
   struct titan_futex_waitv w[2];
   for (int i = 0; i < 2; i++) {
@@ -353,23 +387,22 @@ static void probe_waitv(void) {
   if (pid == 0) {
     struct titan_timespec ts;
     titan_deadline_ns(&ts, 1000000ull);
-    long r = titan_syscall6(TITAN_SYS_futex_waitv, (long)(uintptr_t)w, 2, 0,
-                            (long)(uintptr_t)&ts, 0, 0);
+    long r = titan_syscall6(nr, (long)(uintptr_t)w, 2, 0, (long)(uintptr_t)&ts,
+                            0, 0);
     titan_exit_group(r < 0 ? -r : 0);
   }
-  if (pid < 0) {
-    titan_munmap((void *)(uintptr_t)page, 4096);
+  if (pid < 0)
     return;
-  }
 
   int status = 0;
   titan_wait4(pid, &status, 0);
-  titan_munmap((void *)(uintptr_t)page, 4096);
 
   struct titan_buf b;
   char storage[192];
   titan_buf_init(&b, storage, sizeof(storage));
-  titan_buf_str(&b, "{\"test\":\"futex_waitv\",\"how\":");
+  titan_buf_str(&b, "{\"test\":\"futex_syscall\",\"nr\":");
+  titan_buf_u64(&b, (uint64_t)nr);
+  titan_buf_str(&b, ",\"how\":");
   if (TITAN_WIFSIGNALED(status)) {
     titan_buf_str(&b, "\"signal\",\"value\":");
     titan_buf_i64(&b, TITAN_WTERMSIG(status));
@@ -404,7 +437,8 @@ static int probe_timeout(void) {
   return err == ETIMEDOUT_ ? 0 : -1;
 }
 
-static int run_ping(uint32_t spin, const char *name, uint64_t *elapsed_ns) {
+static int run_ping(uint64_t spin, int wfe, const char *name,
+                    uint64_t *elapsed_ns) {
   long page = shared_page();
   if (page < 0) {
     titan_write_str(2, "mmap failed\n");
@@ -413,7 +447,7 @@ static int run_ping(uint32_t spin, const char *name, uint64_t *elapsed_ns) {
   struct shared_ping *p = (struct shared_ping *)(uintptr_t)page;
   long pid = titan_clone_fork();
   if (pid == 0) {
-    child_futex(p, spin);
+    child_futex(p, spin, wfe);
     titan_exit_group(0);
   }
   if (pid < 0) {
@@ -421,7 +455,7 @@ static int run_ping(uint32_t spin, const char *name, uint64_t *elapsed_ns) {
     titan_munmap((void *)(uintptr_t)page, 4096);
     return -1;
   }
-  int rc = bench_futex(p, spin, name, elapsed_ns);
+  int rc = bench_futex(p, spin, wfe, name, elapsed_ns);
   int status = 0;
   titan_wait4(pid, &status, 0);
   titan_munmap((void *)(uintptr_t)page, 4096);
@@ -430,10 +464,27 @@ static int run_ping(uint32_t spin, const char *name, uint64_t *elapsed_ns) {
 
 int main(void) {
   int rc = 0;
-  uint64_t block_ns = 0, spin_ns = 0, socket_ns = 0;
-  if (run_ping(0, "futex_block", &block_ns) != 0)
+  uint64_t block_ns = 0, poll_ns = 0, wfe_ns = 0, socket_ns = 0;
+
+  long probe_page = titan_mmap(0, 4096, TITAN_PROT_READ | TITAN_PROT_WRITE,
+                               TITAN_MAP_PRIVATE | TITAN_MAP_ANONYMOUS, -1, 0);
+  if (probe_page < 0) {
+    titan_write_str(2, "mmap failed\n");
+    return 1;
+  }
+  probe_syscall(TITAN_SYS_futex_waitv, probe_page);
+  probe_syscall(TITAN_SYS_futex_wake, probe_page);
+  probe_syscall(TITAN_SYS_futex_wait, probe_page);
+  probe_syscall(TITAN_SYS_futex_requeue, probe_page);
+  titan_munmap((void *)(uintptr_t)probe_page, 4096);
+  if (probe_timeout() != 0)
     rc = 1;
-  if (run_ping(SPIN_ITERS, "futex_spin", &spin_ns) != 0)
+
+  if (run_ping(0, 0, "futex_block", &block_ns) != 0)
+    rc = 1;
+  if (run_ping(spin_ticks(SPIN_NS), 0, "futex_poll", &poll_ns) != 0)
+    rc = 1;
+  if (run_ping(spin_ticks(SPIN_NS), 1, "futex_wfe", &wfe_ns) != 0)
     rc = 1;
 
   int sv[2];
@@ -459,18 +510,22 @@ int main(void) {
   titan_wait4(pid, &status, 0);
 
   struct titan_buf ratio;
-  char ratio_storage[320];
+  char ratio_storage[384];
   titan_buf_init(&ratio, ratio_storage, sizeof(ratio_storage));
   titan_buf_str(&ratio, "{\"test\":\"ipc_compare\",\"block_ns\":");
   titan_buf_u64(&ratio, block_ns / PING_ROUNDS);
-  titan_buf_str(&ratio, ",\"spin_ns\":");
-  titan_buf_u64(&ratio, spin_ns / PING_ROUNDS);
+  titan_buf_str(&ratio, ",\"poll_ns\":");
+  titan_buf_u64(&ratio, poll_ns / PING_ROUNDS);
+  titan_buf_str(&ratio, ",\"wfe_ns\":");
+  titan_buf_u64(&ratio, wfe_ns / PING_ROUNDS);
   titan_buf_str(&ratio, ",\"socket_ns\":");
   titan_buf_u64(&ratio, socket_ns / PING_ROUNDS);
   titan_buf_str(&ratio, ",\"block_x100\":");
   titan_buf_u64(&ratio, block_ns ? socket_ns * 100 / block_ns : 0);
-  titan_buf_str(&ratio, ",\"spin_x100\":");
-  titan_buf_u64(&ratio, spin_ns ? socket_ns * 100 / spin_ns : 0);
+  titan_buf_str(&ratio, ",\"poll_x100\":");
+  titan_buf_u64(&ratio, poll_ns ? socket_ns * 100 / poll_ns : 0);
+  titan_buf_str(&ratio, ",\"wfe_x100\":");
+  titan_buf_u64(&ratio, wfe_ns ? socket_ns * 100 / wfe_ns : 0);
   titan_buf_str(&ratio, "}");
   titan_buf_emit(&ratio);
 
@@ -492,10 +547,6 @@ int main(void) {
   if (bench_multi(m) != 0)
     rc = 1;
   titan_wait4(pid, &status, 0);
-
-  probe_waitv();
-  if (probe_timeout() != 0)
-    rc = 1;
 
   return rc;
 }
