@@ -87,17 +87,23 @@ jobs:
         run: |
           set -euo pipefail
           BIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          dump() { "$BIN/llvm-objdump" -d "$1" > "build/m1/$2.dis"; }
+          dump dist/m1/m1_x18_stress stress
+          dump dist/m1/m1_futex_waitv_bench bench
+          dump dist/m1/libtitan_forkd.so forkd
+
           for f in dist/m1/m1_x18_stress dist/m1/m1_futex_waitv_bench dist/m1/libtitan_forkd.so; do
             node scripts/dso_x18_scan.mjs --expect-zero "$f"
           done
-          push_str() { "$BIN/llvm-objdump" -d "$1" | grep -cE '(str|stp)[[:space:]]+x18' || true; }
-          test "$(push_str dist/m1/m1_x18_stress)" -eq 1 \
+
+          stores() { grep -cE '(str|stp)[[:space:]]+x18' "build/m1/$1.dis" || true; }
+          test "$(stores stress)" -eq 1 \
             || { echo "unexpected x18 stores in stress binary"; exit 1; }
-          test "$(push_str dist/m1/libtitan_forkd.so)" -eq 1 \
+          test "$(stores forkd)" -eq 1 \
             || { echo "unexpected x18 stores in forkd"; exit 1; }
-          test "$(push_str dist/m1/m1_futex_waitv_bench)" -eq 0 \
+          test "$(stores bench)" -eq 0 \
             || { echo "unexpected x18 stores in bench"; exit 1; }
-          "$BIN/llvm-objdump" -d dist/m1/m1_x18_stress | grep -q 'titan_sig_trampoline' \
+          grep -q '<titan_sig_trampoline>:' build/m1/stress.dis \
             || { echo "trampoline missing"; exit 1; }
 
       - name: Build mimalloc
