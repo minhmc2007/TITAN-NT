@@ -83,7 +83,8 @@ echo "local_exit=$?" >>"$OUT/probe_untrusted_app.ndjson"
 set -e
 
 for p in /system/lib64/libc.so /system/lib64/libaaudio.so \
-         /system/lib64/libandroid.so /system/lib64/libmediandk.so; do
+         /system/lib64/libandroid.so /system/lib64/libmediandk.so \
+         /system/bin/linker64; do
   dst="$OUT/dso/$(basename "$p")"
   cp "$p" "$dst"
 done

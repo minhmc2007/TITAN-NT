@@ -15,7 +15,7 @@ Measured on the device 2026-11-15. Android 17 (SDK 37), kernel `6.1.162-android1
 | `FUTEX_WAIT_BITSET`, untrusted_app | `ret 0`, 20.5 ms |
 | `kcmp` | shell `EINVAL`, untrusted_app `ENOSYS` |
 | `bpf` / `perf_event_open` | `EPERM` / `EFAULT` in both domains |
-| SCS x18 prologues in bionic | 0 in `libc`, `libaaudio`, `libandroid`, `libmediandk` |
+| SCS x18 prologues in bionic | 0 in `libc`, `libaaudio`, `libandroid`, `libmediandk`, `linker64` |
 
 ## futex_waitv is unavailable to the app domain
 
@@ -33,8 +33,8 @@ domains: a waiter waits on one epoch word and signalers bump it.
 ## Bionic does not use x18 for SCS on this build
 
 The scanner is validated against hand-encoded `str x18, [x18], #8` /
-`ldr x18, [x18, #-8]!` words and llvm-objdump decodes them as such, yet all four
-stock DSOs have zero hits across 938 KB of executable segments. So x18 is free to
+`ldr x18, [x18, #-8]!` words and llvm-objdump decodes them as such, yet all five
+stock DSOs have zero hits across 2.3 MB of executable segments. So x18 is free to
 hold the TEB across bionic calls. `PLAN.md` §5.1 still stands for self-built code
 and the loader, but the `x18_guard` swap becomes a cheap assertion rather than a
 hot-path cost; M1 must prove no bionic call path clobbers x18 (linker, `setjmp`,
