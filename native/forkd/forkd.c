@@ -109,7 +109,13 @@ static void report_threads(void) {
   long fd = titan_openat(TITAN_AT_FDCWD, "/proc/self/task",
                          TITAN_O_RDONLY | TITAN_O_DIRECTORY | TITAN_O_CLOEXEC);
   if (fd < 0) {
-    titan_write_str(2, "{\"test\":\"forkd_threads\",\"error\":\"open\"}\n");
+    struct titan_buf eb;
+    char estorage[128];
+    titan_buf_init(&eb, estorage, sizeof(estorage));
+    titan_buf_str(&eb, "{\"test\":\"forkd_threads\",\"open_ret\":");
+    titan_buf_i64(&eb, fd);
+    titan_buf_str(&eb, "}");
+    titan_buf_emit(&eb);
     return;
   }
 

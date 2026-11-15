@@ -30,13 +30,21 @@ struct worker_arg {
 
 static void mark_bad(const char *why) {
   struct titan_buf b;
-  char storage[192];
+  char storage[320];
   __atomic_add_fetch(&g_bad, 1, __ATOMIC_RELAXED);
   __atomic_store_n(&g_stop, 1, __ATOMIC_RELAXED);
   titan_buf_init(&b, storage, sizeof(storage));
   titan_buf_str(&b, "{\"test\":\"x18_stress\",\"error\":\"");
   titan_buf_str(&b, why);
-  titan_buf_str(&b, "\"}");
+  titan_buf_str(&b, "\",\"tid\":");
+  titan_buf_u64(&b, (uint64_t)titan_gettid());
+  titan_buf_str(&b, ",\"x18\":");
+  titan_buf_hex(&b, (uint64_t)(uintptr_t)titan_x18_get());
+  titan_buf_str(&b, ",\"scs\":");
+  titan_buf_hex(&b, (uint64_t)(uintptr_t)titan_scs_current());
+  titan_buf_str(&b, ",\"teb\":");
+  titan_buf_hex(&b, (uint64_t)(uintptr_t)titan_teb_current());
+  titan_buf_str(&b, "}");
   titan_buf_emit(&b);
 }
 
@@ -201,8 +209,16 @@ int main(int argc, char **argv) {
   g_tebs[0].fault_lo = (uint64_t)(uintptr_t)main_fault;
   g_tebs[0].fault_hi = g_tebs[0].fault_lo + 4096;
   struct titan_itimerval itv = {{0, 1000000}, {0, 1000000}};
-  if (titan_setitimer(2, &itv, 0) != 0) {
-    titan_write_str(2, "setitimer failed\n");
+  long timer = titan_setitimer(2, &itv, 0);
+  if (timer != 0) {
+    struct titan_buf tb;
+    char tstorage[160];
+    titan_buf_init(&tb, tstorage, sizeof(tstorage));
+    titan_buf_str(&tb, "{\"test\":\"x18_stress\",\"error\":\"setitimer\""
+                       ",\"ret\":");
+    titan_buf_i64(&tb, timer);
+    titan_buf_str(&tb, "}");
+    titan_buf_emit(&tb);
     return 1;
   }
 
