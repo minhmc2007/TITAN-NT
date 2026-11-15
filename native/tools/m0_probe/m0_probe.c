@@ -16,6 +16,7 @@
 
 #define FUTEX_WAKE 1
 #define FUTEX_32 2
+#define FUTEX_WAIT_BITSET 9
 #define FUTEX_PRIVATE_FLAG 128
 #define SYS_FUTEX_WAITV 449
 
