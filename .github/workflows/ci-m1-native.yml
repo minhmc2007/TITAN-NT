@@ -72,12 +72,13 @@ jobs:
             build/m1/m1_futex_waitv_bench.o build/m1/titan_log.o \
             build/m1/titan_time.o
 
-          "$cc" -pie -o dist/m1/libtitan_forkd.so \
+          "$cc" -pie -Wl,--dynamic-linker=/system/bin/linker64 -o dist/m1/libtitan_forkd.so \
             build/m1/forkd.o build/m1/titan_log.o build/m1/titan_time.o \
             build/m1/x18_guard.o build/m1/x18_guard_asm.o \
             build/m1/sig_trampoline.o build/m1/titan_signal.o
 
-          "$BIN/llvm-readelf" -h -l dist/m1/libtitan_forkd.so | grep -q 'Requesting program interpreter' \
+          "$BIN/llvm-readelf" -h -l dist/m1/libtitan_forkd.so | grep -E 'Type:|INTERP|interpreter'
+          "$BIN/llvm-readelf" -l dist/m1/libtitan_forkd.so | grep -q 'Requesting program interpreter' \
             || { echo "libtitan_forkd.so is not an executable PIE"; exit 1; }
 
       - name: Static x18 checks
