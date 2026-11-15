@@ -52,6 +52,16 @@ jobs:
       - name: Assert no SCS prologues in self-built binary
         run: node scripts/dso_x18_scan.mjs --expect-zero dist/m0_probe/m0_probe
 
+      - name: Validate scanner against an SCS-built canary
+        run: |
+          set -euo pipefail
+          mkdir -p dist/scs_canary
+          cc="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android34-clang"
+          "$cc" -O1 -fsanitize=shadow-call-stack \
+            -o dist/scs_canary/scs_canary native/tools/m0_probe/scs_canary.c
+          node scripts/dso_x18_scan.mjs dist/scs_canary/scs_canary | tee /tmp/canary.json
+          grep -q '"scs_push":0' /tmp/canary.json && { echo "scanner missed SCS"; exit 1; }
+
       - name: Checksums
         run: |
           set -euo pipefail

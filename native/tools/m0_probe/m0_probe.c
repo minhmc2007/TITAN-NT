@@ -62,8 +62,7 @@ static void *waker_main(void *p) {
   return NULL;
 }
 
-/* Seccomp answers ENOSYS for hidden syscalls without raising SIGSYS, but a
-   future policy could kill the process, so each attempt is isolated. */
+/* Seccomp answers ENOSYS, but a strict policy can SIGSYS: isolate each attempt. */
 static void waitv_in_child(int waiter_flags, int wake_op, int map_flags,
                            struct waitv_result *out) {
   int fds[2];
@@ -142,8 +141,7 @@ static void report_waitv(const char *variant, int waiter_flags, int wake_op,
          variant, waiter_flags, r.ret, r.err, r.sig, r.ms);
 }
 
-/* Single-word wait: the only multi-object primitive left if the app seccomp
-   policy keeps hiding futex_waitv. Both are absolute CLOCK_MONOTONIC. */
+/* Single-address wait, absolute deadline; futex_waitv is hidden from apps. */
 static void report_futex_bitset(void) {
   uint32_t *word = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
                         MAP_SHARED | MAP_ANONYMOUS, -1, 0);
@@ -258,8 +256,7 @@ static void report_proc_line(const char *path, const char *key) {
     printf("{\"test\":\"proc\",\"key\":\"%s\",\"ok\":false}\n", key);
 }
 
-/* The seccomp policy answers ENOSYS for every syscall it hides, so a syscall
-   that is known blocked for apps fingerprints the current domain. */
+/* App-domain syscalls answer ENOSYS when seccomp hides them: fingerprint it. */
 static void report_syscall(const char *name, long nr, long a1, long a2, long a3,
                            long a4, long a5) {
   errno = 0;

@@ -1,7 +1,5 @@
 #!/usr/bin/env node
-// Counts Shadow Call Stack prologue/epilogue words in ELF executable segments.
-// bionic allocates the SCS pointer in x18, the register ARM64EC needs for the TEB,
-// so the hit count tells whether a DSO must be called through x18_guard.
+// SCS keeps its pointer in x18, the register ARM64EC needs for the TEB.
 import { readFileSync } from 'node:fs';
 
 const SCS_PUSH = 0xf8008e52; // str x18, [x18], #8

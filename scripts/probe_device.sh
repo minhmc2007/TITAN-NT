@@ -1,145 +1,116 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Collects M0 gate data from the app domain (the domain forkd runs in). rish is
+# used only for shell-only queries and is skipped when Shizuku is down.
 OUT="probe-out"
-SERIAL_ARGS=()
-PROBE=""
-
-usage() {
-  cat <<'EOF'
-usage: scripts/probe_device.sh [--serial SERIAL] [--probe PATH] [--out DIR]
-
-Collects the Milestone 0 gate data from a Galaxy A55 (SM-A556E) over adb into
-OUT (default probe-out/):
-  device_profile.json  key props, page size, kernel, clocks
-  report.txt           probe transcript (cpuinfo, seccomp, dumpsys, ...)
-  probe.ndjson         m0_probe output (futex_waitv, memfd, low-VA map, affinity)
-  dso/                 pulled bionic DSOs, sha256, x18 SCS scan
-EOF
-}
+PROBE="dist/m0_probe/m0_probe"
+APP_ID="${RISH_APPLICATION_ID:-com.termux}"
+RISH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+DEX="$RISH_DIR/rish_shizuku.dex"
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --serial) SERIAL_ARGS=(-s "$2"); shift 2 ;;
     --probe) PROBE="$2"; shift 2 ;;
     --out) OUT="$2"; shift 2 ;;
-    -h|--help) usage; exit 0 ;;
-    *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
+    --rish) RISH_DIR="$2"; DEX="$RISH_DIR/rish_shizuku.dex"; shift 2 ;;
+    -h|--help) echo "usage: probe_device.sh [--probe PATH] [--out DIR] [--rish DIR]"; exit 0 ;;
+    *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
 
-command -v adb >/dev/null || {
-  echo "adb not found; Arch ARM: pacman -S android-tools" >&2
-  exit 1
-}
-adb "${SERIAL_ARGS[@]}" get-state >/dev/null 2>&1 || {
-  echo "no device; check 'adb devices' and accept the USB debugging prompt" >&2
-  exit 1
-}
-
+[ -f "$PROBE" ] || { echo "missing $PROBE; gh run download -n m0-probe-arm64 -D dist/m0_probe" >&2; exit 1; }
+chmod +x "$PROBE"
 mkdir -p "$OUT/dso"
-sh_() { adb "${SERIAL_ARGS[@]}" shell "$@" | tr -d '\r'; }
-prop() { sh_ getprop "$1" | head -c 200; }
+REPORT="$OUT/report.txt"
 
-# Any DSO built with -ffixed-x18 is called through x18_guard; stock bionic is not.
-if [ -z "$PROBE" ]; then
-  for cand in dist/m0_probe/m0_probe dist/m0_probe/arm64-v8a/m0_probe; do
-    if [ -f "$cand" ]; then PROBE="$cand"; break; fi
-  done
-fi
-[ -f "${PROBE:-/nonexistent}" ] || {
-  echo "m0_probe missing; fetch it with: gh run download -n m0-probe-arm64" >&2
-  echo "then rerun with: --probe dist/m0_probe/m0_probe" >&2
-  exit 1
+rish_up() {
+  [ -f "$DEX" ] || return 1
+  chmod 400 "$DEX"
+  env RISH_APPLICATION_ID="$APP_ID" /system/bin/app_process \
+    -Djava.class.path="$DEX" /system/bin --nice-name=rish \
+    rikka.shizuku.shell.ShizukuShellLoader -c "$1"
 }
 
-REPORT="$OUT/report.txt"
 {
   echo "== identity =="
   for k in ro.product.model ro.product.device ro.board.platform ro.soc.model \
            ro.build.version.release ro.build.version.sdk ro.build.fingerprint \
-           ro.product.cpu.abilist ro.hardware.egl ro.hardware.vulkan \
-           ro.opengles.version ro.vulkan.version; do
-    printf '%s=%s\n' "$k" "$(prop "$k")"
+           ro.product.cpu.abilist ro.hardware.egl ro.hardware.vulkan ro.opengles.version; do
+    printf '%s=%s\n' "$k" "$(getprop "$k")"
   done
-
-  echo
-  echo "== uname =="
-  sh_ uname -a
+  echo "== kernel =="
+  cat /proc/version
   echo "== pagesize =="
-  sh_ getconf PAGESIZE
+  getconf PAGESIZE
   echo "== cpuinfo =="
-  sh_ cat /proc/cpuinfo | head -60
-
-  echo "== clocks (kHz) =="
+  grep -E 'processor|Features|CPU part|BogoMIPS' /proc/cpuinfo | head -40
+  echo "== clocks =="
   for c in 0 1 2 3 4 5 6 7; do
-    for f in cpuinfo_max_freq scaling_max_freq; do
+    for f in cpuinfo_max_freq scaling_max_freq scaling_cur_freq; do
       printf 'cpu%s.%s=%s\n' "$c" "$f" \
-        "$(sh_ cat "/sys/devices/system/cpu/cpu$c/cpufreq/$f" 2>/dev/null || true)"
+        "$(cat "/sys/devices/system/cpu/cpu$c/cpufreq/$f" 2>/dev/null)"
     done
   done
-
-  echo
-  echo "== seccomp =="
-  sh_ cat /proc/self/status | grep -E 'Seccomp' || true
-  echo "== selinux =="
-  sh_ cat /proc/self/attr/current || true
-  echo "== gpu props =="
-  sh_ getprop | grep -iE 'gpu|vulkan|egl|radv|exynos' || true
-  echo "== display =="
-  sh_ wm size; sh_ wm density
-  sh_ dumpsys SurfaceFlinger | grep -m 20 -iE 'refresh|activeMode|vsync' || true
   echo "== meminfo =="
-  sh_ cat /proc/meminfo | head -5
-} | tee "$REPORT"
+  head -3 /proc/meminfo
+} >"$REPORT"
 
-adb "${SERIAL_ARGS[@]}" push "$PROBE" /data/local/tmp/m0_probe >/dev/null
-sh_ chmod 755 /data/local/tmp/m0_probe
-sh_ /data/local/tmp/m0_probe | tee "$OUT/probe.ndjson"
+if rish_up 'id' >/dev/null 2>&1; then
+  {
+    echo "== display =="
+    rish_up 'wm size; wm density'
+    rish_up 'dumpsys SurfaceFlinger | grep -m 8 -iE "activeMode|vsyncRate"'
+    echo "== seccomp policy files =="
+    rish_up 'ls /system/etc/seccomp_policy/'
+  } >>"$REPORT" 2>&1
 
-for p in \
-  /apex/com.android.runtime/lib64/bionic/libc.so \
-  /system/lib64/libc.so \
-  /system/lib64/libaaudio.so \
-  /system/lib64/libandroid.so \
-  /system/lib64/libmediandk.so; do
-  dst="$OUT/dso/$(printf '%s' "$p" | tr '/' '_')"
-  adb "${SERIAL_ARGS[@]}" pull "$p" "$dst" >/dev/null 2>&1 ||
-    echo "pull failed: $p" >>"$OUT/pull_failures.txt"
-done
-
-NODE="$(command -v node || command -v bun || true)"
-if [ -n "$NODE" ] && [ -f scripts/dso_x18_scan.mjs ]; then
-  : >"$OUT/dso/x18_scan.ndjson"
-  for f in "$OUT"/dso/*.so; do
-    [ -f "$f" ] || continue
-    "$NODE" scripts/dso_x18_scan.mjs "$f" >>"$OUT/dso/x18_scan.ndjson"
-  done
+  B64="$(base64 -w0 "$PROBE")"
+  if rish_up "printf %s '$B64' | base64 -d > /data/local/tmp/m0_probe && chmod 755 /data/local/tmp/m0_probe" >/dev/null 2>&1; then
+    set +e
+    rish_up '/data/local/tmp/m0_probe' >"$OUT/probe_shell.ndjson" 2>&1
+    echo "shell_exit=$?" >>"$OUT/probe_shell.ndjson"
+    set -e
+  fi
+  echo "shell_domain=collected" >>"$REPORT"
 else
-  echo "node/bun missing; scan later with: node scripts/dso_x18_scan.mjs $OUT/dso/*.so"
+  echo "shell_domain=unavailable" >>"$REPORT"
 fi
 
-( cd "$OUT/dso" && sha256sum ./*.so >sha256.txt )
+set +e
+"$PROBE" >"$OUT/probe_untrusted_app.ndjson" 2>&1
+echo "local_exit=$?" >>"$OUT/probe_untrusted_app.ndjson"
+set -e
+
+for p in /system/lib64/libc.so /system/lib64/libaaudio.so \
+         /system/lib64/libandroid.so /system/lib64/libmediandk.so; do
+  dst="$OUT/dso/$(basename "$p")"
+  cp "$p" "$dst"
+done
+( cd "$OUT/dso" && for f in *.so; do [ -e "$f" ] || continue; sha256sum "$f"; done >sha256.txt )
+
+NODE="$(command -v node || command -v bun || true)"
+[ -n "$NODE" ] && : >"$OUT/dso/x18_scan.ndjson" &&
+  for f in "$OUT"/dso/*.so; do [ -f "$f" ] && "$NODE" scripts/dso_x18_scan.mjs "$f" >>"$OUT/dso/x18_scan.ndjson"; done
 
 j() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
 num() { printf '%s' "$1" | tr -dc '0-9' | head -c 12; }
+getv() { sed -n "s/^$1=//p" "$REPORT" | head -1; }
 
 cat >"$OUT/device_profile.json" <<EOF
 {
   "captured_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-  "model": "$(j "$(prop ro.product.model)")",
-  "device": "$(j "$(prop ro.product.device)")",
-  "board_platform": "$(j "$(prop ro.board.platform)")",
-  "soc_model": "$(j "$(prop ro.soc.model)")",
-  "android_release": "$(j "$(prop ro.build.version.release)")",
-  "sdk": $(num "$(prop ro.build.version.sdk)" || echo 0),
-  "fingerprint": "$(j "$(prop ro.build.fingerprint)")",
-  "abilist": "$(j "$(prop ro.product.cpu.abilist)")",
-  "kernel": "$(j "$(sh_ uname -r | head -1)")",
-  "pagesize": $(num "$(sh_ getconf PAGESIZE)" || echo 0),
+  "model": "$(j "$(getv ro.product.model)")",
+  "device": "$(j "$(getv ro.product.device)")",
+  "board_platform": "$(j "$(getv ro.board.platform)")",
+  "soc_model": "$(j "$(getv ro.soc.model)")",
+  "android_release": "$(j "$(getv ro.build.version.release)")",
+  "sdk": $(num "$(getv ro.build.version.sdk)" || echo 0),
+  "kernel": "$(j "$(sed -n 's/^Linux version \([^ ]*\).*/\1/p' "$REPORT")")",
+  "pagesize": $(num "$(sed -n '/^== pagesize ==$/{n;p;}' "$REPORT")" || echo 0),
   "cpu_max_freq_khz": {
 $(for c in 0 1 2 3 4 5 6 7; do
-  v="$(sh_ cat "/sys/devices/system/cpu/cpu$c/cpufreq/cpuinfo_max_freq" 2>/dev/null || true)"
+  v="$(sed -n "s/^cpu$c\.cpuinfo_max_freq=//p" "$REPORT" | head -1)"
   printf '    "cpu%d": %s%s\n' "$c" "$(num "$v" || echo 0)" "$([ "$c" -lt 7 ] && echo ,)"
 done)
   }
@@ -147,14 +118,5 @@ done)
 EOF
 
 cat <<EOF
-
-wrote:
-  $OUT/device_profile.json
-  $OUT/report.txt
-  $OUT/probe.ndjson
-  $OUT/dso/
-
-send back device_profile.json, probe.ndjson, dso/x18_scan.ndjson and dso/sha256.txt.
-m0_probe runs in the adb shell domain; untrusted_app seccomp is only proven once
-Milestone 1 runs it through libtitan_forkd.so.
+wrote $OUT/device_profile.json, report.txt, probe_untrusted_app.ndjson, dso/
 EOF
