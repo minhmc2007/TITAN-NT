@@ -48,6 +48,23 @@ delays, not lost wakeups. Shizuku children run in the system cgroup and lose
 the CPU to top-app work while the device is loaded; the ≥5x number has to come
 from a foreground app process, where both peers run in `top-app`.
 
+## App domain, 10-minute gate
+
+Run from a Termux app shell (no proot, `untrusted_app`, native syscall speed),
+same `m1_x18_stress` binary, `--seconds 600 --threads 3` (3 workers + main):
+
+| Counter | Value |
+| --- | --- |
+| guarded calls | 21,652,310,818 |
+| signals handled | 101,959,205 |
+| recovered SIGSEGV | 67,663,470 |
+| recovered SIGILL | 33,831,737 |
+| `guard_bad` / `sig_bad` / `bad` | 0 / 0 / 0 |
+| status | `ok` |
+
+SIGSEGV/SIGILL dominate the signal count because the stress injects one of
+each per 64/128 iterations; SIGPROF is the remainder.
+
 ## Deviations from `PLAN.md`
 
 - Syscall 449 is seccomp-blocked for apps (`ENOSYS`), as measured in M0. The
