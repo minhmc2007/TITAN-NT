@@ -39,7 +39,7 @@ struct waitv_result {
 
 struct waker_arg {
   uint32_t *word;
-  int flags;
+  int wake_op;
 };
 
 static double now_ms(void) {
@@ -48,17 +48,23 @@ static double now_ms(void) {
   return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1000000.0;
 }
 
+static void futex_deadline(struct timespec *ts, long sec) {
+  clock_gettime(CLOCK_MONOTONIC, ts);
+  ts->tv_sec += sec;
+}
+
 static void *waker_main(void *p) {
   struct waker_arg *a = p;
   usleep(20000);
   __atomic_store_n(a->word, 1u, __ATOMIC_RELEASE);
-  syscall(SYS_futex, a->word, FUTEX_WAKE | a->flags, 1, NULL, NULL, 0);
+  syscall(SYS_futex, a->word, a->wake_op, 1, NULL, NULL, 0);
   return NULL;
 }
 
-/* Seccomp denies futex_waitv with SIGSYS, which is fatal in-process; isolate each
-   attempt so the probe keeps reporting after a kill. */
-static void waitv_in_child(int flags, struct waitv_result *out) {
+/* Seccomp answers ENOSYS for hidden syscalls without raising SIGSYS, but a
+   future policy could kill the process, so each attempt is isolated. */
+static void waitv_in_child(int waiter_flags, int wake_op, int map_flags,
+                           struct waitv_result *out) {
   int fds[2];
   if (pipe(fds) != 0) {
     fprintf(stderr, "pipe: %s\n", strerror(errno));
@@ -75,7 +81,7 @@ static void waitv_in_child(int flags, struct waitv_result *out) {
     close(fds[0]);
     struct waitv_result r = {.ret = -1, .err = 0, .sig = 0, .ms = 0.0};
     uint32_t *words = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
-                           MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+                           map_flags | MAP_ANONYMOUS, -1, 0);
 
     if (words == MAP_FAILED) {
       r.err = errno;
@@ -84,17 +90,18 @@ static void waitv_in_child(int flags, struct waitv_result *out) {
       memset(w, 0, sizeof(w));
       w[0].uaddr = (uintptr_t)&words[0];
       w[1].uaddr = (uintptr_t)&words[16];
-      w[0].flags = (uint32_t)flags;
-      w[1].flags = (uint32_t)flags;
+      w[0].flags = (uint32_t)waiter_flags;
+      w[1].flags = (uint32_t)waiter_flags;
 
-      struct waker_arg wa = {.word = &words[0], .flags = flags};
+      struct waker_arg wa = {.word = &words[0], .wake_op = wake_op};
       pthread_t t;
       if (pthread_create(&t, NULL, waker_main, &wa) != 0) {
         r.err = errno;
       } else {
-        struct timespec ts = {.tv_sec = 2, .tv_nsec = 0};
+        struct timespec deadline;
+        futex_deadline(&deadline, 2);
         double t0 = now_ms();
-        r.ret = syscall(SYS_FUTEX_WAITV, w, 2u, 0u, &ts, CLOCK_MONOTONIC);
+        r.ret = syscall(SYS_FUTEX_WAITV, w, 2u, 0u, &deadline, CLOCK_MONOTONIC);
         r.ms = now_ms() - t0;
         r.err = r.ret < 0 ? errno : 0;
         pthread_join(t, NULL);
@@ -125,12 +132,44 @@ static void waitv_in_child(int flags, struct waitv_result *out) {
   *out = r;
 }
 
-static void report_waitv(int flags) {
+static void report_waitv(const char *variant, int waiter_flags, int wake_op,
+                         int map_flags) {
   struct waitv_result r;
-  waitv_in_child(flags, &r);
-  printf("{\"test\":\"futex_waitv\",\"waiter_flags\":%d,\"ret\":%ld,\"errno\":%d,"
-         "\"signal\":%d,\"latency_ms\":%.3f}\n",
-         flags, r.ret, r.err, r.sig, r.ms);
+  waitv_in_child(waiter_flags, wake_op, map_flags, &r);
+  printf("{\"test\":\"futex_waitv\",\"variant\":\"%s\",\"waiter_flags\":%d,"
+         "\"ret\":%ld,\"errno\":%d,\"signal\":%d,\"latency_ms\":%.3f}\n",
+         variant, waiter_flags, r.ret, r.err, r.sig, r.ms);
+}
+
+/* Single-word wait: the only multi-object primitive left if the app seccomp
+   policy keeps hiding futex_waitv. Both are absolute CLOCK_MONOTONIC. */
+static void report_futex_bitset(void) {
+  uint32_t *word = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                        MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+  if (word == MAP_FAILED) {
+    printf("{\"test\":\"futex_wait_bitset\",\"errno\":%d}\n", errno);
+    return;
+  }
+
+  struct waker_arg wa = {.word = word, .wake_op = FUTEX_WAKE};
+  pthread_t t;
+  if (pthread_create(&t, NULL, waker_main, &wa) != 0) {
+    printf("{\"test\":\"futex_wait_bitset\",\"errno\":%d}\n", errno);
+    return;
+  }
+
+  struct timespec deadline;
+  futex_deadline(&deadline, 2);
+  double t0 = now_ms();
+  long ret = syscall(SYS_futex, word, FUTEX_WAIT_BITSET, 0, &deadline, NULL, 1u);
+  double ms = now_ms() - t0;
+  int err = ret < 0 ? errno : 0;
+  pthread_join(t, NULL);
+
+  printf("{\"test\":\"futex_wait_bitset\",\"ret\":%ld,\"errno\":%d,"
+         "\"latency_ms\":%.3f}\n",
+         ret, err, ms);
+  munmap(word, 4096);
 }
 
 static void report_va(uint64_t addr) {
@@ -278,8 +317,10 @@ int main(void) {
   report_syscall("perf_event_open", SYS_perf_event_open, 0, 0, 0, -1, 0);
   report_syscall("kcmp", SYS_kcmp, 0, 0, 0, 0, 0);
 
-  report_waitv(FUTEX_32);
-  report_waitv(FUTEX_32 | FUTEX_PRIVATE_FLAG);
+  report_waitv("shared", FUTEX_32, FUTEX_WAKE, MAP_SHARED);
+  report_waitv("private", FUTEX_32 | FUTEX_PRIVATE_FLAG,
+               FUTEX_WAKE | FUTEX_PRIVATE_FLAG, MAP_PRIVATE);
+  report_futex_bitset();
 
   report_memfd();
 
