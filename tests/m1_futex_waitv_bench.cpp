@@ -17,6 +17,8 @@ struct shared_ping {
   alignas(64) uint32_t ack;
   alignas(64) uint32_t ack_epoch;
   alignas(64) uint32_t stop;
+  alignas(64) uint32_t child_seen;
+  alignas(64) uint32_t child_waiting;
 };
 
 struct shared_multi {
@@ -27,6 +29,19 @@ struct shared_multi {
   alignas(64) uint32_t stop;
 };
 
+static long shared_page(void) {
+  long fd = titan_memfd_create("titan-m1-bench", 0);
+  if (fd < 0)
+    return -1;
+  if (titan_ftruncate((int)fd, 4096) != 0) {
+    titan_close(fd);
+    return -1;
+  }
+  long p = titan_mmap(0, 4096, TITAN_PROT_READ | TITAN_PROT_WRITE,
+                      TITAN_MAP_SHARED, (int)fd, 0);
+  titan_close(fd);
+  return p;
+}
 
 static void pin_cpu(int cpu) {
   unsigned char mask[128];
@@ -77,7 +92,10 @@ static void child_futex(struct shared_ping *p) {
     while (__atomic_load_n(&p->req_epoch, __ATOMIC_ACQUIRE) == seen) {
       if (__atomic_load_n(&p->stop, __ATOMIC_ACQUIRE))
         titan_exit_group(0);
+      __atomic_store_n(&p->child_seen, seen, __ATOMIC_RELAXED);
+      __atomic_store_n(&p->child_waiting, 1, __ATOMIC_RELAXED);
       wait_eq(&p->req_epoch, seen, 2000000000ull);
+      __atomic_store_n(&p->child_waiting, 0, __ATOMIC_RELAXED);
     }
     if (__atomic_load_n(&p->stop, __ATOMIC_ACQUIRE))
       titan_exit_group(0);
@@ -115,6 +133,9 @@ static uint64_t loadavg_x100(void) {
 
 static int bench_futex(struct shared_ping *p, uint64_t *elapsed_ns) {
   uint64_t failures = 0, stalls = 0, max_stall_ns = 0;
+  uint64_t stall_entry = 0, stall_wait = 0;
+  uint32_t stall_req_epoch = 0, stall_ack_epoch = 0, stall_ack = 0;
+  uint32_t stall_seen = 0, stall_waiting = 0;
   uint64_t t0 = titan_monotonic_ns();
   for (uint32_t i = 0; i < PING_ROUNDS; i++) {
     uint64_t round0 = titan_monotonic_ns();
@@ -127,6 +148,15 @@ static int bench_futex(struct shared_ping *p, uint64_t *elapsed_ns) {
       uint64_t now = titan_monotonic_ns();
       if (now >= limit || wait_change(&p->ack_epoch, seen, limit - now) != 0) {
         stalls++;
+        if (now >= limit)
+          stall_entry++;
+        else
+          stall_wait++;
+        stall_req_epoch = __atomic_load_n(&p->req_epoch, __ATOMIC_RELAXED);
+        stall_ack_epoch = __atomic_load_n(&p->ack_epoch, __ATOMIC_RELAXED);
+        stall_ack = __atomic_load_n(&p->ack, __ATOMIC_RELAXED);
+        stall_seen = __atomic_load_n(&p->child_seen, __ATOMIC_RELAXED);
+        stall_waiting = __atomic_load_n(&p->child_waiting, __ATOMIC_RELAXED);
         uint64_t took = titan_monotonic_ns() - round0;
         if (took > max_stall_ns)
           max_stall_ns = took;
@@ -158,6 +188,20 @@ static int bench_futex(struct shared_ping *p, uint64_t *elapsed_ns) {
   titan_buf_u64(&b, max_stall_ns / 1000);
   titan_buf_str(&b, ",\"loadavg_x100\":");
   titan_buf_u64(&b, loadavg_x100());
+  titan_buf_str(&b, ",\"stall_entry\":");
+  titan_buf_u64(&b, stall_entry);
+  titan_buf_str(&b, ",\"stall_wait\":");
+  titan_buf_u64(&b, stall_wait);
+  titan_buf_str(&b, ",\"stall_req_epoch\":");
+  titan_buf_u64(&b, stall_req_epoch);
+  titan_buf_str(&b, ",\"stall_ack_epoch\":");
+  titan_buf_u64(&b, stall_ack_epoch);
+  titan_buf_str(&b, ",\"stall_ack\":");
+  titan_buf_u64(&b, stall_ack);
+  titan_buf_str(&b, ",\"stall_seen\":");
+  titan_buf_u64(&b, stall_seen);
+  titan_buf_str(&b, ",\"stall_waiting\":");
+  titan_buf_u64(&b, stall_waiting);
   titan_buf_str(&b, "}");
   titan_buf_emit(&b);
   *elapsed_ns = elapsed;
@@ -259,18 +303,14 @@ static int bench_multi(struct shared_multi *m) {
   return failures == 0 ? 0 : -1;
 }
 
+/* 449 is SIGSYS under untrusted_app, so it must die in a child. */
 static void probe_waitv(void) {
-  struct shared_ping *p = (struct shared_ping *)0;
-  struct titan_futex_waitv w[2];
-  struct titan_timespec ts;
-  titan_deadline_ns(&ts, 1000000ull);
-
   long page = titan_mmap(0, 4096, TITAN_PROT_READ | TITAN_PROT_WRITE,
-                         TITAN_MAP_SHARED | TITAN_MAP_ANONYMOUS, -1, 0);
+                         TITAN_MAP_PRIVATE | TITAN_MAP_ANONYMOUS, -1, 0);
   if (page < 0)
     return;
-  p = (struct shared_ping *)(uintptr_t)page;
-
+  struct shared_ping *p = (struct shared_ping *)(uintptr_t)page;
+  struct titan_futex_waitv w[2];
   for (int i = 0; i < 2; i++) {
     w[i].val = 0;
     w[i].uaddr = (uint64_t)(uintptr_t)&p->req_epoch + (uint64_t)i * 64u;
@@ -278,22 +318,41 @@ static void probe_waitv(void) {
     w[i].reserved = 0;
   }
 
-  long r = titan_syscall6(TITAN_SYS_futex_waitv, (long)(uintptr_t)w, 2, 0,
-                          (long)(uintptr_t)&ts, 0, 0);
+  long pid = titan_clone_fork();
+  if (pid == 0) {
+    struct titan_timespec ts;
+    titan_deadline_ns(&ts, 1000000ull);
+    long r = titan_syscall6(TITAN_SYS_futex_waitv, (long)(uintptr_t)w, 2, 0,
+                            (long)(uintptr_t)&ts, 0, 0);
+    titan_exit_group(r < 0 ? -r : 0);
+  }
+  if (pid < 0) {
+    titan_munmap((void *)(uintptr_t)page, 4096);
+    return;
+  }
+
+  int status = 0;
+  titan_wait4(pid, &status, 0);
+  titan_munmap((void *)(uintptr_t)page, 4096);
+
   struct titan_buf b;
   char storage[192];
   titan_buf_init(&b, storage, sizeof(storage));
-  titan_buf_str(&b, "{\"test\":\"futex_waitv\",\"ret\":");
-  titan_buf_i64(&b, r);
-  titan_buf_str(&b, ",\"errno\":");
-  titan_buf_i64(&b, r < 0 ? -r : 0);
+  titan_buf_str(&b, "{\"test\":\"futex_waitv\",\"how\":");
+  if (TITAN_WIFSIGNALED(status)) {
+    titan_buf_str(&b, "\"signal\",\"value\":");
+    titan_buf_i64(&b, TITAN_WTERMSIG(status));
+  } else {
+    titan_buf_str(&b, "\"exit\",\"value\":");
+    titan_buf_i64(&b, TITAN_WEXITSTATUS(status));
+  }
   titan_buf_str(&b, "}");
   titan_buf_emit(&b);
 }
 
 static int probe_timeout(void) {
   long page = titan_mmap(0, 4096, TITAN_PROT_READ | TITAN_PROT_WRITE,
-                         TITAN_MAP_SHARED | TITAN_MAP_ANONYMOUS, -1, 0);
+                         TITAN_MAP_PRIVATE | TITAN_MAP_ANONYMOUS, -1, 0);
   if (page < 0)
     return -1;
   uint32_t *word = (uint32_t *)(uintptr_t)page;
@@ -315,10 +374,8 @@ static int probe_timeout(void) {
 }
 
 int main(void) {
-  long ping_page = titan_mmap(0, 4096, TITAN_PROT_READ | TITAN_PROT_WRITE,
-                              TITAN_MAP_SHARED | TITAN_MAP_ANONYMOUS, -1, 0);
-  long multi_page = titan_mmap(0, 4096, TITAN_PROT_READ | TITAN_PROT_WRITE,
-                               TITAN_MAP_SHARED | TITAN_MAP_ANONYMOUS, -1, 0);
+  long ping_page = shared_page();
+  long multi_page = shared_page();
   if (ping_page < 0 || multi_page < 0) {
     titan_write_str(2, "mmap failed\n");
     return 1;
