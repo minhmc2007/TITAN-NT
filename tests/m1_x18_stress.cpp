@@ -24,7 +24,6 @@ static uint64_t g_seconds = 600;
 struct worker_arg {
   struct titan_teb *teb;
   volatile int *page;
-  uint64_t iterations;
   int ready;
 };
 
@@ -61,9 +60,14 @@ static int jmp_roundtrip(void) {
   return titan_x18_get() == before ? 0 : 1;
 }
 
-static void fault_once(struct titan_teb *teb, volatile int *page) {
+static void arm_fault(struct titan_teb *teb, volatile int *page) {
   teb->fault_lo = (uint64_t)(uintptr_t)page;
-  teb->fault_hi = (uint64_t)(uintptr_t)page + 4096;
+  teb->fault_hi = teb->fault_lo + 4096;
+  teb->ill_lo = (uint64_t)(uintptr_t)titan_udf_trap;
+  teb->ill_hi = teb->ill_lo + 4;
+}
+
+static void fault_once(volatile int *page) {
   if (titan_mprotect((void *)page, 4096, TITAN_PROT_NONE) != 0) {
     mark_bad("mprotect-fault-page");
     return;
@@ -72,19 +76,14 @@ static void fault_once(struct titan_teb *teb, volatile int *page) {
     mark_bad("fault-page-value");
 }
 
-static void ill_once(struct titan_teb *teb) {
-  uint64_t fn = (uint64_t)(uintptr_t)titan_udf_trap;
-  teb->ill_lo = fn;
-  teb->ill_hi = fn + 4;
-  titan_udf_trap();
-}
+static void ill_once(void) { titan_udf_trap(); }
 
 static void stress_iteration(struct titan_teb *teb, volatile int *page,
                              uint64_t i) {
   if ((i & 63) == 0)
-    fault_once(teb, page);
+    fault_once(page);
   if ((i & 127) == 3)
-    ill_once(teb);
+    ill_once();
   if ((i & 255) == 5 && jmp_roundtrip() != 0)
     mark_bad("setjmp-longjmp-x18");
 
@@ -119,18 +118,26 @@ static void stress_iteration(struct titan_teb *teb, volatile int *page,
 
 static void *worker_main(void *argp) {
   struct worker_arg *arg = (struct worker_arg *)argp;
-  if (titan_thread_init(arg->teb) != 0)
+  if (titan_thread_init(arg->teb) != 0) {
     mark_bad("worker-thread-init");
+    return 0;
+  }
+  arm_fault(arg->teb, arg->page);
   *arg->page = 0x5a5a;
   __atomic_store_n(&arg->ready, 1, __ATOMIC_RELEASE);
 
   uint64_t i = 0;
-  while (!__atomic_load_n(&g_stop, __ATOMIC_RELAXED)) {
+  while (!__atomic_load_n(&g_stop, __ATOMIC_RELAXED))
     stress_iteration(arg->teb, arg->page, ++i);
-    if ((i & 0xffff) == 0)
-      arg->iterations = i;
-  }
   return 0;
+}
+
+static int arg_is(const char *arg, const char *name) {
+  while (*arg && *name) {
+    if (*arg++ != *name++)
+      return 0;
+  }
+  return *arg == *name;
 }
 
 static uint64_t parse_u64(const char *s) {
@@ -153,17 +160,12 @@ static int join_worker(pthread_t th) {
 int main(int argc, char **argv) {
   struct worker_arg args[MAX_THREADS];
   pthread_t threads[MAX_THREADS];
-  volatile int *pages[MAX_THREADS];
 
-  for (int i = 1; i < argc; i++) {
-    if (argc > i + 1 && argv[i][0] == '-' && argv[i][1] == '-') {
-      uint64_t v = parse_u64(argv[i + 1]);
-      if (argv[i][2] == 's' && argv[i][3] == 'e')
-        g_seconds = v;
-      else if (argv[i][2] == 't')
-        g_threads = (int)v;
-      i++;
-    }
+  for (int i = 1; i + 1 < argc; i += 2) {
+    if (arg_is(argv[i], "--seconds"))
+      g_seconds = parse_u64(argv[i + 1]);
+    else if (arg_is(argv[i], "--threads"))
+      g_threads = (int)parse_u64(argv[i + 1]);
   }
   if (g_threads < 1)
     g_threads = 1;
@@ -186,11 +188,8 @@ int main(int argc, char **argv) {
       titan_write_str(2, "mmap fault page failed\n");
       return 1;
     }
-    pages[i] = (volatile int *)(uintptr_t)p;
-    *pages[i] = 0x5a5a;
     args[i].teb = &g_tebs[i + 1];
-    args[i].page = pages[i];
-    args[i].iterations = 0;
+    args[i].page = (volatile int *)(uintptr_t)p;
     args[i].ready = 0;
     if (spawn_worker(&args[i], &threads[i]) != 0) {
       titan_write_str(2, "pthread_create failed\n");
@@ -211,8 +210,7 @@ int main(int argc, char **argv) {
   }
   volatile int *main_fault = (volatile int *)(uintptr_t)main_page;
   *main_fault = 0x5a5a;
-  g_tebs[0].fault_lo = (uint64_t)(uintptr_t)main_fault;
-  g_tebs[0].fault_hi = g_tebs[0].fault_lo + 4096;
+  arm_fault(&g_tebs[0], main_fault);
   struct titan_itimerval itv = {{0, 1000}, {0, 1000}};
   long timer = titan_setitimer(2, &itv, 0);
   if (timer != 0) {

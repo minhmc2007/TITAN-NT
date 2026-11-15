@@ -24,7 +24,6 @@ int titan_buf_emit(struct titan_buf *b);
 
 void titan_fatal(const char *msg);
 void titan_write_str(int fd, const char *s);
-void titan_write_u64(int fd, uint64_t v);
 
 #ifdef __cplusplus
 }

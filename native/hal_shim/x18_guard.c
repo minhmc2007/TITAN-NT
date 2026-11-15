@@ -119,8 +119,6 @@ void titan_thread_report(struct titan_teb *teb, const char *label) {
   titan_buf_u64(&b, __atomic_load_n(&teb->faults, __ATOMIC_RELAXED));
   titan_buf_str(&b, ",\"ill\":");
   titan_buf_u64(&b, __atomic_load_n(&teb->ill, __ATOMIC_RELAXED));
-  titan_buf_str(&b, ",\"ok\":");
-  titan_buf_str(&b, titan_thread_ok(teb) ? "true" : "false");
   titan_buf_str(&b, "}");
   titan_buf_emit(&b);
 }

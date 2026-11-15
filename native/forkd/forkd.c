@@ -11,11 +11,7 @@
 #define FORKD_MAGIC 0x544954414e464430ull
 #define FORKD_ACK 0x4644524bull
 
-struct forkd_state {
-  struct titan_teb teb;
-};
-
-static struct forkd_state g_state;
+static struct titan_teb g_teb;
 
 static size_t s_len(const char *s) {
   size_t n = 0;
@@ -107,7 +103,7 @@ static int is_art_thread(const char *comm) {
 
 static void report_threads(void) {
   long fd = titan_openat(TITAN_AT_FDCWD, "/proc/self/task",
-                         TITAN_O_RDONLY | TITAN_O_DIRECTORY | TITAN_O_CLOEXEC);
+                         TITAN_O_RDONLY | TITAN_O_CLOEXEC);
   if (fd < 0) {
     struct titan_buf eb;
     char estorage[128];
@@ -201,12 +197,12 @@ static int forkd_child(int fd) {
   int ok = words[0] == FORKD_MAGIC;
   words[1] = FORKD_ACK;
 
-  if (titan_thread_init(&g_state.teb) != 0) {
+  if (titan_thread_init(&g_teb) != 0) {
     titan_write_str(2, "child x18 init failed\n");
     return 3;
   }
   long pid = titan_guard_call((void *)getpid, 0, 0, 0, 0, 0, 0);
-  ok = ok && pid > 0 && titan_thread_ok(&g_state.teb);
+  ok = ok && pid > 0 && titan_thread_ok(&g_teb);
 
   struct titan_buf b;
   char storage[192];
@@ -216,7 +212,7 @@ static int forkd_child(int fd) {
   titan_buf_str(&b, ",\"magic\":");
   titan_buf_str(&b, words[0] == FORKD_MAGIC ? "true" : "false");
   titan_buf_str(&b, ",\"x18\":");
-  titan_buf_str(&b, titan_thread_ok(&g_state.teb) ? "ok" : "bad");
+  titan_buf_str(&b, titan_thread_ok(&g_teb) ? "ok" : "bad");
   titan_buf_str(&b, "}");
   titan_buf_emit(&b);
   return ok ? 0 : 4;
@@ -281,7 +277,7 @@ int main(int argc, char **argv) {
   if (child_fd >= 0)
     return forkd_child(child_fd);
 
-  if (titan_thread_init(&g_state.teb) != 0) {
+  if (titan_thread_init(&g_teb) != 0) {
     titan_write_str(2, "thread init failed\n");
     return 1;
   }
@@ -330,16 +326,16 @@ int main(int argc, char **argv) {
   titan_buf_str(&b, "}");
   titan_buf_emit(&b);
 
-  uint64_t sig_before = __atomic_load_n(&g_state.teb.sig_teb, __ATOMIC_RELAXED) +
-                        __atomic_load_n(&g_state.teb.sig_scs, __ATOMIC_RELAXED);
+  uint64_t sig_before = __atomic_load_n(&g_teb.sig_teb, __ATOMIC_RELAXED) +
+                        __atomic_load_n(&g_teb.sig_scs, __ATOMIC_RELAXED);
   titan_guard_call((void *)getpid, 0, 0, 0, 0, 0, 0);
   struct titan_timespec ts;
   titan_guard_call((void *)clock_gettime, TITAN_CLOCK_MONOTONIC,
                    (long)(uintptr_t)&ts, 0, 0, 0, 0);
   titan_tgkill(titan_getpid(), titan_gettid(), 10);
-  uint64_t sig_after = __atomic_load_n(&g_state.teb.sig_teb, __ATOMIC_RELAXED) +
-                       __atomic_load_n(&g_state.teb.sig_scs, __ATOMIC_RELAXED);
-  int x18_ok = titan_thread_ok(&g_state.teb) && sig_after > sig_before;
+  uint64_t sig_after = __atomic_load_n(&g_teb.sig_teb, __ATOMIC_RELAXED) +
+                       __atomic_load_n(&g_teb.sig_scs, __ATOMIC_RELAXED);
+  int x18_ok = titan_thread_ok(&g_teb) && sig_after > sig_before;
 
   titan_buf_init(&b, storage, sizeof(storage));
   titan_buf_str(&b, "{\"test\":\"forkd_x18\",\"signal_seen\":");

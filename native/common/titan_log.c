@@ -86,15 +86,6 @@ void titan_write_str(int fd, const char *s) {
   titan_write(fd, s, titan_strlen(s));
 }
 
-void titan_write_u64(int fd, uint64_t v) {
-  struct titan_buf b;
-  char storage[32];
-  titan_buf_init(&b, storage, sizeof(storage));
-  titan_buf_u64(&b, v);
-  titan_buf_putc(&b, '\n');
-  titan_write(fd, b.data, b.len);
-}
-
 void titan_fatal(const char *msg) {
   titan_write_str(2, "titan_fatal: ");
   titan_write_str(2, msg);
