@@ -58,6 +58,8 @@ rish_up() {
 
 if rish_up 'id' >/dev/null 2>&1; then
   {
+    echo "== kernel_rish =="
+    rish_up 'uname -r'
     echo "== display =="
     rish_up 'wm size; wm density'
     rish_up 'dumpsys SurfaceFlinger | grep -m 8 -iE "activeMode|vsyncRate"'
@@ -92,7 +94,10 @@ done
 
 NODE="$(command -v node || command -v bun || true)"
 [ -n "$NODE" ] && : >"$OUT/dso/x18_scan.ndjson" &&
-  for f in "$OUT"/dso/*.so; do [ -f "$f" ] && "$NODE" scripts/dso_x18_scan.mjs "$f" >>"$OUT/dso/x18_scan.ndjson"; done
+  for f in "$OUT"/dso/*; do
+    case "$f" in *.txt|*.ndjson) continue ;; esac
+    [ -f "$f" ] && "$NODE" scripts/dso_x18_scan.mjs "$f" >>"$OUT/dso/x18_scan.ndjson"
+  done
 
 j() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
 num() { printf '%s' "$1" | tr -dc '0-9' | head -c 12; }
@@ -107,7 +112,7 @@ cat >"$OUT/device_profile.json" <<EOF
   "soc_model": "$(j "$(getv ro.soc.model)")",
   "android_release": "$(j "$(getv ro.build.version.release)")",
   "sdk": $(num "$(getv ro.build.version.sdk)" || echo 0),
-  "kernel": "$(j "$(sed -n 's/^Linux version \([^ ]*\).*/\1/p' "$REPORT")")",
+  "kernel": "$(j "$(sed -n '/^== kernel_rish ==$/{n;p;}' "$REPORT")")",
   "pagesize": $(num "$(sed -n '/^== pagesize ==$/{n;p;}' "$REPORT")" || echo 0),
   "cpu_max_freq_khz": {
 $(for c in 0 1 2 3 4 5 6 7; do
