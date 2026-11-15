@@ -29,7 +29,6 @@ struct shared_multi {
   alignas(64) uint32_t stop;
 };
 
-static int mode;
 
 static void pin_cpu(int cpu) {
   unsigned char mask[128];
