@@ -321,6 +321,7 @@ int main(void) {
   uint64_t socket_ns = 0;
   if (bench_socket(sv[0], &socket_ns) != 0)
     rc = 1;
+  titan_close(sv[0]);
   titan_close(sv[1]);
   titan_wait4(pid, &status, 0);
 
