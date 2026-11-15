@@ -11,8 +11,8 @@
 #define PING_ROUNDS 20000
 #define MULTI_ITERS 200000
 
-/* Spin budget before blocking. Tuned on device, not derived. */
-#define SPIN_ITERS 4000
+/* Covers a peer turnaround of roughly 20 us before blocking. */
+#define SPIN_ITERS 20000
 
 struct shared_ping {
   alignas(64) uint32_t req;
