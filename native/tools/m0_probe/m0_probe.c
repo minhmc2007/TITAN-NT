@@ -15,6 +15,7 @@
 #include <unistd.h>
 
 #define FUTEX_WAKE 1
+#define FUTEX_32 2
 #define FUTEX_PRIVATE_FLAG 128
 #define SYS_FUTEX_WAITV 449
 
@@ -217,6 +218,31 @@ static void report_proc_line(const char *path, const char *key) {
     printf("{\"test\":\"proc\",\"key\":\"%s\",\"ok\":false}\n", key);
 }
 
+/* The seccomp policy answers ENOSYS for every syscall it hides, so a syscall
+   that is known blocked for apps fingerprints the current domain. */
+static void report_syscall(const char *name, long nr, long a1, long a2, long a3,
+                           long a4, long a5) {
+  errno = 0;
+  long r = syscall(nr, a1, a2, a3, a4, a5);
+  printf("{\"test\":\"syscall\",\"name\":\"%s\",\"nr\":%ld,\"ret\":%ld,"
+         "\"errno\":%d}\n",
+         name, nr, r, r < 0 ? errno : 0);
+}
+
+static void report_file_value(const char *path, const char *label) {
+  FILE *f = fopen(path, "r");
+  char line[512] = {0};
+  if (!f) {
+    printf("{\"test\":\"proc\",\"key\":\"%s\",\"ok\":false}\n", label);
+    return;
+  }
+  if (!fgets(line, sizeof(line), f))
+    line[0] = '\0';
+  fclose(f);
+  line[strcspn(line, "\r\n")] = '\0';
+  printf("{\"test\":\"proc\",\"key\":\"%s\",\"value\":\"%s\"}\n", label, line);
+}
+
 static void report_min_map(void) {
   FILE *f = fopen("/proc/self/maps", "r");
   if (!f)
@@ -230,6 +256,8 @@ static void report_min_map(void) {
   fclose(f);
 }
 
+static uint32_t all_zero_word;
+
 int main(void) {
   struct utsname u;
   memset(&u, 0, sizeof(u));
@@ -242,10 +270,16 @@ int main(void) {
 
   report_proc_line("/proc/self/status", "Seccomp:");
   report_proc_line("/proc/self/status", "Seccomp_filters:");
-  report_proc_line("/proc/self/attr/current", "");
+  report_file_value("/proc/self/attr/current", "selinux");
 
-  report_waitv(0);
-  report_waitv(FUTEX_PRIVATE_FLAG);
+  report_syscall("futex_wake", SYS_futex, (long)(uintptr_t)&all_zero_word,
+                 FUTEX_WAKE, 1, 0, 0);
+  report_syscall("bpf", SYS_bpf, 0, 0, 0, 0, 0);
+  report_syscall("perf_event_open", SYS_perf_event_open, 0, 0, 0, -1, 0);
+  report_syscall("kcmp", SYS_kcmp, 0, 0, 0, 0, 0);
+
+  report_waitv(FUTEX_32);
+  report_waitv(FUTEX_32 | FUTEX_PRIVATE_FLAG);
 
   report_memfd();
 
