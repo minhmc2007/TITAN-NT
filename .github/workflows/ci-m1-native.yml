@@ -77,7 +77,6 @@ jobs:
             build/m1/x18_guard.o build/m1/x18_guard_asm.o \
             build/m1/sig_trampoline.o build/m1/titan_signal.o
 
-          "$BIN/llvm-readelf" -h -l dist/m1/libtitan_forkd.so | grep -E 'Type:|INTERP|interpreter'
           "$BIN/llvm-readelf" -l dist/m1/libtitan_forkd.so | grep -q 'Requesting program interpreter' \
             || { echo "libtitan_forkd.so is not an executable PIE"; exit 1; }
 
@@ -88,7 +87,7 @@ jobs:
           for f in dist/m1/m1_x18_stress dist/m1/m1_futex_waitv_bench dist/m1/libtitan_forkd.so; do
             node scripts/dso_x18_scan.mjs --expect-zero "$f"
           done
-          push_str() { "$BIN/llvm-objdump" -d "$1" | grep -cE 'str[[:space:]]+x18' || true; }
+          push_str() { "$BIN/llvm-objdump" -d "$1" | grep -cE '(str|stp)[[:space:]]+x18' || true; }
           test "$(push_str dist/m1/m1_x18_stress)" -eq 1 \
             || { echo "unexpected x18 stores in stress binary"; exit 1; }
           test "$(push_str dist/m1/libtitan_forkd.so)" -eq 1 \
