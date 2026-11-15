@@ -1,0 +1,122 @@
+name: ci-m1-native
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-m1-native-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  NDK_VERSION: 30.0.16248370
+  MIMALLOC_COMMIT: 07d6126055867a3c6c8977eb0066be27c0671054
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Validate scanner
+        run: |
+          set -euo pipefail
+          node --check scripts/dso_x18_scan.mjs
+          node scripts/dso_x18_scan.mjs --self-test
+
+      - name: Locate NDK
+        run: |
+          set -euo pipefail
+          echo "NDK=/usr/local/lib/android/sdk/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+          test -x "/usr/local/lib/android/sdk/ndk/$NDK_VERSION/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" \
+            || { echo "NDK $NDK_VERSION missing from runner image"; exit 1; }
+
+      - name: Build M1 binaries
+        run: |
+          set -euo pipefail
+          mkdir -p dist/m1
+          BIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          cc="$BIN/aarch64-linux-android34-clang"
+          cxx="$BIN/aarch64-linux-android34-clang++"
+          flags=(-O2 -g -Wall -Wextra -Werror
+                 -ffixed-x18 -fno-sanitize=shadow-call-stack
+                 -march=armv8.2-a+lse -fno-omit-frame-pointer
+                 -Inative)
+          common=(native/common/titan_log.c native/common/titan_time.c)
+          shim=(native/hal_shim/x18_guard.c
+                native/hal_shim/x18_guard_asm.S
+                native/hal_shim/sig_trampoline.S
+                native/hal_shim/titan_signal.c)
+
+          "$cxx" "${flags[@]}" -std=c++20 -Wno-deprecated-register -fno-exceptions -fno-rtti -nostdlib++ \
+            -o dist/m1/m1_x18_stress \
+            tests/m1_x18_stress.cpp "${common[@]}" "${shim[@]}"
+
+          "$cxx" "${flags[@]}" -std=c++20 -Wno-deprecated-register -fno-exceptions -fno-rtti -nostdlib++ \
+            -o dist/m1/m1_futex_waitv_bench \
+            tests/m1_futex_waitv_bench.cpp "${common[@]}"
+
+          "$cc" "${flags[@]}" -fPIE -pie \
+            -o dist/m1/libtitan_forkd.so \
+            native/forkd/forkd.c "${common[@]}" "${shim[@]}"
+
+          "$BIN/llvm-readelf" -h -l dist/m1/libtitan_forkd.so | grep -q 'Requesting program interpreter' \
+            || { echo "libtitan_forkd.so is not an executable PIE"; exit 1; }
+
+      - name: Static x18 checks
+        run: |
+          set -euo pipefail
+          BIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          for f in dist/m1/m1_x18_stress dist/m1/m1_futex_waitv_bench dist/m1/libtitan_forkd.so; do
+            node scripts/dso_x18_scan.mjs --expect-zero "$f"
+          done
+          push_str() { "$BIN/llvm-objdump" -d "$1" | grep -cE 'str[[:space:]]+x18' || true; }
+          test "$(push_str dist/m1/m1_x18_stress)" -eq 1 \
+            || { echo "unexpected x18 stores in stress binary"; exit 1; }
+          test "$(push_str dist/m1/libtitan_forkd.so)" -eq 1 \
+            || { echo "unexpected x18 stores in forkd"; exit 1; }
+          test "$(push_str dist/m1/m1_futex_waitv_bench)" -eq 0 \
+            || { echo "unexpected x18 stores in bench"; exit 1; }
+          "$BIN/llvm-objdump" -d dist/m1/m1_x18_stress | grep -q 'titan_sig_trampoline' \
+            || { echo "trampoline missing"; exit 1; }
+
+      - name: Build mimalloc
+        run: |
+          set -euo pipefail
+          git init -q external/mimalloc
+          git -C external/mimalloc remote add origin https://github.com/microsoft/mimalloc
+          git -C external/mimalloc fetch -q --depth 1 origin "$MIMALLOC_COMMIT"
+          git -C external/mimalloc checkout -q FETCH_HEAD
+          test "$(git -C external/mimalloc rev-parse HEAD)" = "$MIMALLOC_COMMIT" \
+            || { echo "mimalloc pin mismatch"; exit 1; }
+          cmake -S external/mimalloc -B build-mimalloc \
+            -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-34 \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DMI_BUILD_SHARED=OFF -DMI_BUILD_TESTS=OFF -DMI_BUILD_OBJECT=OFF \
+            -DMI_OVERRIDE=OFF \
+            -DCMAKE_C_FLAGS="-ffixed-x18 -fno-sanitize=shadow-call-stack -march=armv8.2-a+lse"
+          cmake --build build-mimalloc --parallel 4
+          lib="$(find build-mimalloc -name 'libmimalloc*.a' | head -1)"
+          test -n "$lib" || { echo "mimalloc static library missing"; exit 1; }
+          cp "$lib" dist/m1/libmimalloc.a
+
+      - name: Checksums
+        run: |
+          set -euo pipefail
+          cd dist/m1
+          sha256sum m1_x18_stress m1_futex_waitv_bench libtitan_forkd.so libmimalloc.a \
+            > sha256.txt
+          cat sha256.txt
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: m1-arm64-artifacts
+          path: dist/m1/
+          if-no-files-found: error
+          retention-days: 30
