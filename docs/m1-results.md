@@ -32,6 +32,22 @@ PRoot results for the IPC comparison are transport-bound: futex 150–368 µs vs
 socket 117–340 µs per roundtrip, both dominated by the ptrace stop. The `≥5x`
 gate number must come from a real process (`adb shell`), see below.
 
+## Shell domain (Shizuku, run 43709583627)
+
+`rish` children land in the shell/system cgroup, `Seccomp: 0`, `u:r:shell:s0`.
+
+| Run | Result |
+| --- | --- |
+| `libtitan_forkd.so --hold 2` | identical to the app-domain run: low-VA ok, exec ack ok, x18 signal ok, 1 thread, `art=0` |
+| `futex_waitv` (449) probe | `-ETIMEDOUT`, so 449 is allowed here |
+| `m1_futex_waitv_bench` | 200,000 epoch transitions, 0 lost wakeups; ping 0 ack mismatches, 10 waits hit the 10 s budget with `loadavg` 18.7 |
+| ping, excluding the 10 s stalls | futex 145 µs vs socket 247 µs per roundtrip |
+
+Every 10 s stall ended with the ack arriving, so they are peer-scheduling
+delays, not lost wakeups. Shizuku children run in the system cgroup and lose
+the CPU to top-app work while the device is loaded; the ≥5x number has to come
+from a foreground app process, where both peers run in `top-app`.
+
 ## Deviations from `PLAN.md`
 
 - Syscall 449 is seccomp-blocked for apps (`ENOSYS`), as measured in M0. The
