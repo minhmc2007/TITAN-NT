@@ -89,19 +89,47 @@ static void child_futex(struct shared_ping *p) {
   }
 }
 
+static uint64_t loadavg_x100(void) {
+  long fd = titan_openat(TITAN_AT_FDCWD, "/proc/loadavg", TITAN_O_RDONLY);
+  if (fd < 0)
+    return 0;
+  char buf[64];
+  long n = titan_read(fd, buf, sizeof(buf) - 1);
+  titan_close(fd);
+  if (n <= 0)
+    return 0;
+  buf[n] = '\0';
+  uint64_t whole = 0, frac = 0;
+  const char *c = buf;
+  while (*c >= '0' && *c <= '9')
+    whole = whole * 10 + (uint64_t)(*c++ - '0');
+  if (*c == '.') {
+    c++;
+    for (int d = 0; d < 2 && *c >= '0' && *c <= '9'; d++)
+      frac = frac * 10 + (uint64_t)(*c++ - '0');
+    if (frac < 10)
+      frac *= 10;
+  }
+  return whole * 100 + frac;
+}
+
 static int bench_futex(struct shared_ping *p, uint64_t *elapsed_ns) {
-  uint64_t failures = 0;
+  uint64_t failures = 0, stalls = 0, max_stall_ns = 0;
   uint64_t t0 = titan_monotonic_ns();
   for (uint32_t i = 0; i < PING_ROUNDS; i++) {
+    uint64_t round0 = titan_monotonic_ns();
     __atomic_store_n(&p->req, i, __ATOMIC_RELEASE);
     __atomic_add_fetch(&p->req_epoch, 1, __ATOMIC_RELEASE);
     wake_all(&p->req_epoch);
-    uint64_t limit = titan_monotonic_ns() + 10000000000ull;
+    uint64_t limit = round0 + 10000000000ull;
     while (__atomic_load_n(&p->ack_epoch, __ATOMIC_ACQUIRE) < i + 1) {
       uint32_t seen = __atomic_load_n(&p->ack_epoch, __ATOMIC_ACQUIRE);
       uint64_t now = titan_monotonic_ns();
       if (now >= limit || wait_change(&p->ack_epoch, seen, limit - now) != 0) {
-        failures++;
+        stalls++;
+        uint64_t took = titan_monotonic_ns() - round0;
+        if (took > max_stall_ns)
+          max_stall_ns = took;
         break;
       }
     }
@@ -124,6 +152,12 @@ static int bench_futex(struct shared_ping *p, uint64_t *elapsed_ns) {
   titan_buf_u64(&b, elapsed / PING_ROUNDS);
   titan_buf_str(&b, ",\"failures\":");
   titan_buf_u64(&b, failures);
+  titan_buf_str(&b, ",\"stalls\":");
+  titan_buf_u64(&b, stalls);
+  titan_buf_str(&b, ",\"max_stall_us\":");
+  titan_buf_u64(&b, max_stall_ns / 1000);
+  titan_buf_str(&b, ",\"loadavg_x100\":");
+  titan_buf_u64(&b, loadavg_x100());
   titan_buf_str(&b, "}");
   titan_buf_emit(&b);
   *elapsed_ns = elapsed;
