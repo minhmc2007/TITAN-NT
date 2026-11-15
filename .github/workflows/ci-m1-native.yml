@@ -39,7 +39,7 @@ jobs:
       - name: Build M1 binaries
         run: |
           set -euo pipefail
-          mkdir -p dist/m1
+          mkdir -p dist/m1 build/m1
           BIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
           cc="$BIN/aarch64-linux-android34-clang"
           cxx="$BIN/aarch64-linux-android34-clang++"
@@ -47,23 +47,35 @@ jobs:
                  -ffixed-x18 -fno-sanitize=shadow-call-stack
                  -march=armv8.2-a+lse -fno-omit-frame-pointer
                  -Inative)
-          common=(native/common/titan_log.c native/common/titan_time.c)
-          shim=(native/hal_shim/x18_guard.c
-                native/hal_shim/x18_guard_asm.S
-                native/hal_shim/sig_trampoline.S
-                native/hal_shim/titan_signal.c)
+          cxxflags=(-std=c++20 -Wno-deprecated-register -fno-exceptions -fno-rtti)
 
-          "$cxx" "${flags[@]}" -std=c++20 -Wno-deprecated-register -fno-exceptions -fno-rtti -nostdlib++ \
-            -o dist/m1/m1_x18_stress \
-            tests/m1_x18_stress.cpp "${common[@]}" "${shim[@]}"
+          for f in native/common/titan_log.c native/common/titan_time.c \
+                   native/hal_shim/x18_guard.c \
+                   native/hal_shim/x18_guard_asm.S \
+                   native/hal_shim/sig_trampoline.S \
+                   native/hal_shim/titan_signal.c \
+                   native/forkd/forkd.c; do
+            "$cc" "${flags[@]}" -c "$f" -o "build/m1/$(basename "${f%.*}").o"
+          done
 
-          "$cxx" "${flags[@]}" -std=c++20 -Wno-deprecated-register -fno-exceptions -fno-rtti -nostdlib++ \
-            -o dist/m1/m1_futex_waitv_bench \
-            tests/m1_futex_waitv_bench.cpp "${common[@]}"
+          "$cxx" "${flags[@]}" "${cxxflags[@]}" -c tests/m1_x18_stress.cpp \
+            -o build/m1/m1_x18_stress.o
+          "$cxx" "${flags[@]}" "${cxxflags[@]}" -c tests/m1_futex_waitv_bench.cpp \
+            -o build/m1/m1_futex_waitv_bench.o
 
-          "$cc" "${flags[@]}" -fPIE -pie \
-            -o dist/m1/libtitan_forkd.so \
-            native/forkd/forkd.c "${common[@]}" "${shim[@]}"
+          "$cxx" -nostdlib++ -pie -o dist/m1/m1_x18_stress \
+            build/m1/m1_x18_stress.o build/m1/titan_log.o build/m1/titan_time.o \
+            build/m1/x18_guard.o build/m1/x18_guard_asm.o \
+            build/m1/sig_trampoline.o build/m1/titan_signal.o
+
+          "$cxx" -nostdlib++ -pie -o dist/m1/m1_futex_waitv_bench \
+            build/m1/m1_futex_waitv_bench.o build/m1/titan_log.o \
+            build/m1/titan_time.o
+
+          "$cc" -pie -o dist/m1/libtitan_forkd.so \
+            build/m1/forkd.o build/m1/titan_log.o build/m1/titan_time.o \
+            build/m1/x18_guard.o build/m1/x18_guard_asm.o \
+            build/m1/sig_trampoline.o build/m1/titan_signal.o
 
           "$BIN/llvm-readelf" -h -l dist/m1/libtitan_forkd.so | grep -q 'Requesting program interpreter' \
             || { echo "libtitan_forkd.so is not an executable PIE"; exit 1; }
