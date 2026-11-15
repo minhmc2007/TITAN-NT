@@ -6,16 +6,17 @@ these commits, not from a branch head.
 | Dependency | Repository | Tag | Commit | License |
 | --- | --- | --- | --- | --- |
 | RADV for Xclipse | `JimVulkan/radv-xclipse` | `v1.9.0` | `cc87fdf71267dd0acc3b470920a6566a1a46f0be` | MIT |
-| CPU translator | `FEX-Emu/FEX` | `FEX-2611.1` | `37d37a761818438e6cd43fdf5cdbb010d62ec436` | MIT |
+| CPU translator | `FEX-Emu/FEX` | `FEX-2611.1` | `4f9c1f1e36443d22d7655477e34f51b95b685bf1` | MIT |
 | Wine (ARM64EC) | `ValveSoftware/wine` | `proton-wine-11.0-2e` | `e60892cc2398b0a83c332a2078c7b85e47bdb42b` | LGPL-2.1+ |
-| D3D11 | `doitsujin/dxvk` | `v3.1.1` | `1e0f92318d6ec7b7286e050d9e24fd01a2d09c92` | Zlib |
+| D3D11 | `doitsujin/dxvk` | `v3.1.1` | `b1a1c99ab52b687cf950d62c88bc2fa316b41663` | Zlib |
 | D3D12 | `HansKristian-Work/vkd3d-proton` | `v3.1` | `4522cc1a8b1347f1ab1b0f7b14a23ed9444d95d1` | LGPL-2.1 |
-| Allocator | `microsoft/mimalloc` | `v3.6.1` | `07d6126055867a3c6c8977eb0066be27c0671054` | MIT |
+| Allocator | `microsoft/mimalloc` | `v3.6.1` | `56dc5eb80145f9a3ba7ca23d47c6a248b9d8586c` | MIT |
 
 Re-verify with:
 
 ```sh
-git ls-remote --tags --refs https://github.com/JimVulkan/radv-xclipse.git refs/tags/v1.9.0
+# Peeled tag commit, not the tag object: annotated tags print both lines.
+git ls-remote https://github.com/microsoft/mimalloc.git 'refs/tags/v3.6.1*'
 gh api repos/HansKristian-Work/vkd3d-proton/releases/latest --jq .tag_name
 ```
 
