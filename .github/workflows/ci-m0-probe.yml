@@ -52,19 +52,19 @@ jobs:
       - name: Assert no SCS prologues in self-built binary
         run: node scripts/dso_x18_scan.mjs --expect-zero dist/m0_probe/m0_probe
 
-      - name: Validate scanner against an SCS-built canary
+      - name: Validate scanner against encoded SCS words
         run: |
           set -euo pipefail
           mkdir -p dist/scs_canary
           cc="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android34-clang"
-          "$cc" -O2 -fno-inline -fsanitize=shadow-call-stack \
-            -o dist/scs_canary/scs_canary native/tools/m0_probe/scs_canary.c
-          node scripts/dso_x18_scan.mjs dist/scs_canary/scs_canary | tee /tmp/canary.json
-          if grep -q '"scs_push":0' /tmp/canary.json; then
-            "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-objdump" -d dist/scs_canary/scs_canary | head -40
-            echo "scanner missed SCS"
-            exit 1
-          fi
+          objdump="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-objdump"
+          "$cc" -shared -nostdlib -fPIC -o dist/scs_canary/scs_canary.so \
+            native/tools/m0_probe/scs_canary.S
+          "$objdump" -d dist/scs_canary/scs_canary.so | grep -E 'x18'
+          "$objdump" -d dist/scs_canary/scs_canary.so | grep -q 'str.*x18, \[x18\], #8' \
+            || { echo "encoder mismatch: push"; exit 1; }
+          node scripts/dso_x18_scan.mjs dist/scs_canary/scs_canary.so | tee /tmp/canary.json
+          grep -q '"scs_push":1' /tmp/canary.json || { echo "scanner missed SCS"; exit 1; }
 
       - name: Checksums
         run: |
