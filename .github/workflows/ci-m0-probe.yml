@@ -9,12 +9,18 @@ concurrency:
   group: ci-m0-probe-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
+env:
+  NDK_VERSION: 30.0.16248370
+
 jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Validate scripts
         run: |
@@ -26,19 +32,10 @@ jobs:
       - name: Locate NDK
         run: |
           set -euo pipefail
-          shopt -s nullglob
-          candidates=()
-          for d in /usr/local/lib/android/sdk/ndk/*; do
-            v="$(basename "$d")"
-            major="${v%%.*}"
-            if [ "$major" -ge 27 ] && [ -x "$d/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" ]; then
-              candidates+=("$v")
-            fi
-          done
-          [ "${#candidates[@]}" -gt 0 ] || { echo "no NDK >= r27 on runner"; exit 1; }
-          version="$(printf '%s\n' "${candidates[@]}" | sort -V | tail -1)"
-          echo "NDK=/usr/local/lib/android/sdk/ndk/$version" >> "$GITHUB_ENV"
-          echo "using NDK $version"
+          echo "NDK=/usr/local/lib/android/sdk/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+          test -x "/usr/local/lib/android/sdk/ndk/$NDK_VERSION/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" \
+            || { echo "NDK $NDK_VERSION missing from runner image"; exit 1; }
+          "/usr/local/lib/android/sdk/ndk/$NDK_VERSION/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" --version
 
       - name: Build m0_probe
         run: |
@@ -62,7 +59,7 @@ jobs:
           sha256sum m0_probe > m0_probe.sha256
           cat m0_probe.sha256
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: m0-probe-arm64
           path: dist/m0_probe/
