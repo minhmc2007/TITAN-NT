@@ -42,8 +42,13 @@ static void mark_bad(const char *why) {
   titan_buf_hex(&b, (uint64_t)(uintptr_t)titan_x18_get());
   titan_buf_str(&b, ",\"scs\":");
   titan_buf_hex(&b, (uint64_t)(uintptr_t)titan_scs_current());
-  titan_buf_str(&b, ",\"teb\":");
-  titan_buf_hex(&b, (uint64_t)(uintptr_t)titan_teb_current());
+  struct titan_teb *t = titan_teb_current();
+  titan_buf_str(&b, ",\"teb_magic\":");
+  titan_buf_hex(&b, t ? t->magic : 0);
+  titan_buf_str(&b, ",\"teb_self\":");
+  titan_buf_hex(&b, t ? t->self : 0);
+  titan_buf_str(&b, ",\"teb_scs\":");
+  titan_buf_hex(&b, t ? t->scs_ptr : 0);
   titan_buf_str(&b, "}");
   titan_buf_emit(&b);
 }
@@ -208,7 +213,7 @@ int main(int argc, char **argv) {
   *main_fault = 0x5a5a;
   g_tebs[0].fault_lo = (uint64_t)(uintptr_t)main_fault;
   g_tebs[0].fault_hi = g_tebs[0].fault_lo + 4096;
-  struct titan_itimerval itv = {{0, 1000000}, {0, 1000000}};
+  struct titan_itimerval itv = {{0, 1000}, {0, 1000}};
   long timer = titan_setitimer(2, &itv, 0);
   if (timer != 0) {
     struct titan_buf tb;
