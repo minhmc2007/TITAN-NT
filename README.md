@@ -28,8 +28,7 @@ cannot assume: `futex_waitv` (syscall 449) under seccomp, `memfd` sharing across
 free address space below 4 GB for the WoW64 reservation, and A55/A78 affinity masks.
 
 ```sh
-gh run download -n m0-probe-arm64 -D dist
-chmod +x scripts/probe_device.sh
+gh run download -n m0-probe-arm64 -D dist/m0_probe
 scripts/probe_device.sh --probe dist/m0_probe/m0_probe
 ```
 
