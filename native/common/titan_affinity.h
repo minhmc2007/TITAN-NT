@@ -5,6 +5,9 @@
 extern "C" {
 #endif
 
+#define TITAN_MASK_EFF 0x0full
+#define TITAN_MASK_PERF 0xf0ull
+
 /* 1 = A78 cluster (CPU 4-7), 0 = A55 cluster (CPU 0-3). */
 int titan_pin_cluster(int perf);
 

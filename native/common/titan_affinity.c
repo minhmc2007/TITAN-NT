@@ -2,9 +2,6 @@
 
 #include "titan_sys.h"
 
-#define TITAN_MASK_EFF 0x0full
-#define TITAN_MASK_PERF 0xf0ull
-
 int titan_pin_cluster(int perf) {
   uint64_t mask = perf ? TITAN_MASK_PERF : TITAN_MASK_EFF;
   return (int)titan_sched_setaffinity(0, sizeof(mask), &mask);

@@ -183,23 +183,48 @@ static int probe_lowva(uint64_t addr) {
   return ok;
 }
 
+static long g_affinity_early;
+
 static void probe_affinity(void) {
   uint64_t orig = 0;
-  int read_ok = titan_sched_getaffinity(0, sizeof(orig), &orig) == 0;
-  int perf = 0, eff = 0;
-  if (read_ok) {
-    perf = titan_pin_cluster(1) == 0 && titan_cluster_of_self() == 1;
-    eff = titan_pin_cluster(0) == 0 && titan_cluster_of_self() == 0;
+  long rg = titan_sched_getaffinity(0, sizeof(orig), &orig);
+  long rp = 0, re = 0;
+  uint64_t mp = 0, me = 0;
+  if (rg == 0) {
+    rp = titan_pin_cluster(1);
+    if (rp == 0)
+      titan_sched_getaffinity(0, sizeof(mp), &mp);
+    re = titan_pin_cluster(0);
+    if (re == 0)
+      titan_sched_getaffinity(0, sizeof(me), &me);
     titan_sched_setaffinity(0, sizeof(orig), &orig);
   }
 
   struct titan_buf b;
-  char storage[160];
+  char storage[256];
   titan_buf_init(&b, storage, sizeof(storage));
-  titan_buf_str(&b, "{\"test\":\"forkd_affinity\",\"perf\":");
-  titan_buf_str(&b, perf ? "true" : "false");
+  titan_buf_str(&b, "{\"test\":\"forkd_affinity\",\"early\":");
+  titan_buf_i64(&b, g_affinity_early);
+  titan_buf_str(&b, ",\"get\":");
+  titan_buf_i64(&b, rg);
+  titan_buf_str(&b, ",\"orig\":");
+  titan_buf_u64(&b, orig);
+  titan_buf_str(&b, ",\"set_perf\":");
+  titan_buf_i64(&b, rp);
+  titan_buf_str(&b, ",\"mask_perf\":");
+  titan_buf_u64(&b, mp);
+  titan_buf_str(&b, ",\"set_eff\":");
+  titan_buf_i64(&b, re);
+  titan_buf_str(&b, ",\"mask_eff\":");
+  titan_buf_u64(&b, me);
+  titan_buf_str(&b, ",\"perf\":");
+  titan_buf_str(&b, rp == 0 && (mp & TITAN_MASK_PERF) && !(mp & TITAN_MASK_EFF)
+                        ? "true"
+                        : "false");
   titan_buf_str(&b, ",\"eff\":");
-  titan_buf_str(&b, eff ? "true" : "false");
+  titan_buf_str(&b, re == 0 && (me & TITAN_MASK_EFF) && !(me & TITAN_MASK_PERF)
+                        ? "true"
+                        : "false");
   titan_buf_str(&b, "}");
   titan_buf_emit(&b);
 }
@@ -321,6 +346,9 @@ int main(int argc, char **argv) {
 
   if (child_fd >= 0)
     return forkd_child(child_fd);
+
+  uint64_t early_mask = 0;
+  g_affinity_early = titan_sched_getaffinity(0, sizeof(early_mask), &early_mask);
 
   if (titan_thread_init(&g_teb) != 0) {
     titan_write_str(2, "thread init failed\n");
