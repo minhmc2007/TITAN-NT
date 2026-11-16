@@ -68,12 +68,12 @@ jobs:
           cp -a out/tests out/root/tests
           cp tests/win/run.sh out/root/run.sh
           chmod +x out/root/run.sh
-          tar -C out/root -I 'zstd -T0 -6' -cf dist/titan-m2-wine.tar.zst .
+          tar -C out/root -czf dist/titan-m2-wine.tar.gz .
           ls -l dist/
 
       - uses: actions/upload-artifact@v7
         with:
           name: titan-m2-wine
-          path: dist/titan-m2-wine.tar.zst
+          path: dist/titan-m2-wine.tar.gz
           if-no-files-found: error
           retention-days: 30
