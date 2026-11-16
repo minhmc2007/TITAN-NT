@@ -49,19 +49,22 @@ gh api repos/HansKristian-Work/vkd3d-proton/releases/latest --jq .tag_name
 | Target triple | `aarch64-linux-android30` | Amphora's proven baseline |
 | PE archs | `arm64ec,aarch64,i386` (+ implied `x86_64`) | `--enable-archs` |
 
-`deps/patches/wine/` is the seven-commit bionic patch stack from
+`deps/patches/wine/` started as the seven-commit bionic patch stack from
 `amphora-dev/proton-wine` branch `amphora/exp-11.0-20261027b` (commit `7b3ceaf8644b`),
-rebased onto `e60892cc`. All seven apply to `2e` with offsets only; provenance:
+rebased onto `e60892cc`. Six of those survive; `ca552f7c9c` is replaced by TITAN's own
+fsync patch because it only turned fsync off. All apply to `e60892cc` with offsets only;
+provenance:
 
-| Patch | Amphora commit | Purpose |
+| Patch | Origin | Purpose |
 | --- | --- | --- |
-| `0001-configure-android-no-preloader` | `cc7a988069` | linker64 cannot load the static preloader |
-| `0002-ntdll-android-linker64-exec` | `d64ec180bf` | run app-private ELFs through `/system/bin/linker64` |
-| `0003-ntdll-android-execmod-anon-mremap` | `5220da919d` | SELinux denies `execmod` on relocated PE pages |
-| `0004-ntdll-android-protect-exec-sections` | `d41f6df033` | relocate without writing RO/exec pages |
-| `0005-fsync-android-no-shm` | `ca552f7c9c` | bionic has no `shm_open`; fsync stays off |
-| `0006-ntdll-android-no-m-perturb` | `0d15b86a21` | bionic has no `M_PERTURB` |
-| `0007-server-android-nls-from-argv0` | `ad85a24b20` | `/proc/self/exe` is linker64, not wineserver |
+| `0001-configure-android-no-preloader` | Amphora `cc7a988069` | linker64 cannot load the static preloader |
+| `0002-ntdll-android-linker64-exec` | Amphora `d64ec180bf` | run app-private ELFs through `/system/bin/linker64` |
+| `0003-ntdll-android-execmod-anon-mremap` | Amphora `5220da919d` | SELinux denies `execmod` on relocated PE pages |
+| `0004-ntdll-android-protect-exec-sections` | Amphora `d41f6df033` | relocate without writing RO/exec pages |
+| `0005-fsync-android-epoch` | TITAN (replaces Amphora `ca552f7c9c`) | file-backed shm plus a wake epoch, since bionic has no `shm_open` and app seccomp traps `futex_waitv` |
+| `0006-ntdll-android-no-m-perturb` | Amphora `0d15b86a21` | bionic has no `M_PERTURB` |
+| `0007-server-android-nls-from-argv0` | Amphora `ad85a24b20` | `/proc/self/exe` is linker64, not wineserver |
+| `0008-ntdll-android-no-userfaultfd` | TITAN | upstream hardcodes the x86_64 `userfaultfd` number for every arch; arm64 is 282 and Android traps it |
 
 `deps/patches/fex/` is `unixlib-android.patch` (no `librt`, `shm_open`/`shm_unlink`
 stubs) plus upstream `71444c94` (threads killed by `NtTerminateProcess` left FEX mutexes

@@ -226,7 +226,7 @@ static int max_objects(void)
 
 int main(int argc, char **argv)
 {
-    unsigned long long t0, t1, i;
+    unsigned long long t0, t1, i, ns;
     HANDLE ev;
 
     if (argc == 3 && !strcmp(argv[1], "--child")) {
@@ -250,8 +250,10 @@ int main(int argc, char **argv)
     for (i = 0; i < 200000; i++) WaitForSingleObject(ev, 0);
     t1 = now_ns();
     CloseHandle(ev);
-    printf("{\"test\":\"win_sync\",\"name\":\"signalled_wait_ns\",\"value\":%llu,\"rounds\":200000}\n",
-           (t1 - t0) / 200000);
+    ns = (t1 - t0) / 200000;
+    printf("{\"test\":\"win_sync\",\"name\":\"signalled_wait_ns\",\"value\":%llu,\"rounds\":200000}\n", ns);
+    /* The M2 gate forbids a wineserver round trip here; one costs about 50 us. */
+    check("signalled_wait_local", ns < 5000);
     printf("{\"test\":\"win_sync_summary\",\"checks\":%d,\"failures\":%d,\"bits\":%u}\n",
            checks, failures, (unsigned)(sizeof(void *) * 8));
     return failures ? 1 : 0;

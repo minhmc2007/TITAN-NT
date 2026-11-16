@@ -1,0 +1,466 @@
+From: TITAN-NT <titan@localhost>
+Date: Mon, 16 Nov 2026 17:00:00 +0700
+Subject: [PATCH] server, ntdll: Enable fsync on Android without shm_open or
+ futex_waitv.
+
+fsync was switched off on Android because Bionic has no POSIX shared memory
+and the app seccomp filter traps futex_waitv (449). Both are fixable without
+changing the protocol.
+
+The shared memory becomes a file in the config directory, which both sides
+already agree on and which is the same MAP_SHARED mapping that futexes are
+keyed by, so cross-process wakes still work. shm index 0 is never handed out
+to an object, so it carries a wake epoch: signallers store the object, bump
+the epoch and wake it, and waiters sleep on the epoch with FUTEX_WAIT_BITSET
+instead of futex_waitv. A waiter reads the epoch before scanning the objects,
+so a signal between the scan and the wait makes the wait fail with EAGAIN
+instead of being lost. Waking every waiter on every signal costs more than
+futex_waitv did, but it keeps NtWait* out of wineserver.
+
+Amphora-Origin: replaces ca552f7c9c, which only turned fsync off
+Amphora-Upstream: android-only
+---
+diff --git a/dlls/ntdll/unix/fsync.c b/dlls/ntdll/unix/fsync.c
+--- a/dlls/ntdll/unix/fsync.c
++++ b/dlls/ntdll/unix/fsync.c
+@@ -63,22 +63,26 @@
+ int fsync_enabled;
+ static int current_pid;
+ 
+-/* futex_waitv interface */
+-
+-#ifndef __NR_futex_waitv
+-
+-# define __NR_futex_waitv 449
+-# define FUTEX_32 2
+-struct futex_waitv {
+-    uint64_t   val;
+-    uint64_t   uaddr;
+-    uint32_t   flags;
+-    uint32_t __reserved;
+-};
+-
++/* Classic futex operations. Android's app seccomp filter traps futex_waitv, so
++ * waits use a shared wake epoch and FUTEX_WAIT_BITSET instead. */
++#ifndef FUTEX_WAKE
++#define FUTEX_WAKE 1
++#endif
++#ifndef FUTEX_WAIT_BITSET
++#define FUTEX_WAIT_BITSET 9
++#endif
++#ifndef FUTEX_CLOCK_REALTIME
++#define FUTEX_CLOCK_REALTIME 256
++#endif
++#ifndef FUTEX_BITSET_MATCH_ANY
++#define FUTEX_BITSET_MATCH_ANY 0xffffffff
+ #endif
+ 
+-#define u64_to_ptr(x) (void *)(uintptr_t)(x)
++/* shm index 0 is never handed out to an object, so both sides use it as the wake
++ * epoch: signallers bump it and waiters sleep on it. */
++#define FSYNC_EPOCH_SHM_IDX 0
++
++#define FSYNC_SHM_NAME "fsync.shm"
+ 
+ struct timespec64
+ {
+@@ -121,14 +125,6 @@
+     end->tv_nsec = (nt_end % TICKSPERSEC) * 100;
+ }
+ 
+-static inline void futex_vector_set( struct futex_waitv *waitv, int *addr, int val )
+-{
+-    waitv->uaddr = (uintptr_t) addr;
+-    waitv->val = val;
+-    waitv->flags = FUTEX_32;
+-    waitv->__reserved = 0;
+-}
+-
+ static void simulate_sched_quantum(void)
+ {
+     if (!fsync_simulate_sched_quantum) return;
+@@ -138,18 +134,9 @@
+     usleep(0);
+ }
+ 
+-static inline int futex_wait_multiple( const struct futex_waitv *futexes,
+-        int count, const struct timespec64 *end, clockid_t clock_id )
+-{
+-   if (end)
+-        return syscall( __NR_futex_waitv, futexes, count, 0, end, clock_id );
+-   else
+-        return syscall( __NR_futex_waitv, futexes, count, 0, NULL, 0 );
+-}
+-
+ static inline int futex_wake( int *addr, int val )
+ {
+-    return syscall( __NR_futex, addr, 1, val, NULL, 0, 0 );
++    return syscall( __NR_futex, addr, FUTEX_WAKE, val, NULL, 0, 0 );
+ }
+ 
+ struct fsync
+@@ -185,7 +172,9 @@
+ };
+ C_ASSERT(sizeof(struct mutex) == 16);
+ 
++#ifndef __ANDROID__
+ static char shm_name[29];
++#endif
+ static int shm_fd;
+ static volatile void *shm_addrs[8192];
+ 
+@@ -218,6 +207,38 @@
+     return (char *)shm_addrs[entry] + offset;
+ }
+ 
++static int *epoch_word(void)
++{
++    return get_shm( FSYNC_EPOCH_SHM_IDX );
++}
++
++/* A signaller stores the object first and bumps the epoch second, so a waiter
++ * that reads the epoch before scanning the objects either sees the object or
++ * has its futex wait rejected with EAGAIN. */
++static void wake_epoch(void)
++{
++    int *epoch = epoch_word();
++
++    __atomic_add_fetch( epoch, 1, __ATOMIC_SEQ_CST );
++    futex_wake( epoch, INT_MAX );
++}
++
++static inline int futex_wait_epoch( int *epoch, int val, const struct timespec64 *end,
++                                    clockid_t clock_id )
++{
++    struct timespec ts;
++    int op = FUTEX_WAIT_BITSET;
++
++    if (clock_id == CLOCK_REALTIME) op |= FUTEX_CLOCK_REALTIME;
++    if (end)
++    {
++        ts.tv_sec = end->tv_sec;
++        ts.tv_nsec = end->tv_nsec;
++        return syscall( __NR_futex, epoch, op, val, &ts, 0, FUTEX_BITSET_MATCH_ANY );
++    }
++    return syscall( __NR_futex, epoch, op, val, NULL, 0, FUTEX_BITSET_MATCH_ANY );
++}
++
+ /* We'd like lookup to be fast. To that end, we use a static list indexed by handle.
+  * This is copied and adapted from the fd cache code. */
+ 
+@@ -452,10 +473,22 @@
+ 
+ void fsync_init( DWORD pid )
+ {
+-    struct stat st;
++    fsync_enabled = 1;
+ 
++#ifdef __ANDROID__
++    /* Bionic has no POSIX shared memory; the server puts the same mapping in a
++     * file inside the config directory. */
++    char path[PATH_MAX];
++
++    snprintf( path, sizeof(path), "%s/%s", config_dir, FSYNC_SHM_NAME );
++    if ((shm_fd = open( path, O_RDWR | O_CLOEXEC )) == -1)
++    {
++        ERR("Failed to open fsync shared memory %s: %s\n", path, strerror( errno ));
++        exit(1);
++    }
++#else
++    struct stat st;
+ 
+-    fsync_enabled = 1;
+     syscall( __NR_futex_waitv, NULL, 0, 0, NULL, 0 );
+     if (errno == ENOSYS || errno == EPERM)
+     {
+@@ -480,6 +513,7 @@
+             ERR("Failed to initialize shared memory: %s\n", strerror( errno ));
+         exit(1);
+     }
++#endif
+ 
+     current_pid = pid;
+     assert( current_pid );
+@@ -507,7 +541,7 @@
+ 
+     if (prev) *prev = current;
+ 
+-    futex_wake( &semaphore->count, INT_MAX );
++    wake_epoch();
+ 
+     put_object( &obj );
+     return STATUS_SUCCESS;
+@@ -547,7 +581,7 @@
+     }
+ 
+     if (!(current = __atomic_exchange_n( &event->signaled, 1, __ATOMIC_SEQ_CST )))
+-        futex_wake( &event->signaled, INT_MAX );
++        wake_epoch();
+ 
+     if (prev) *prev = current;
+ 
+@@ -606,7 +640,7 @@
+      * Unfortunately we can't really do much better. Fortunately this is rarely
+      * used (and publicly deprecated). */
+     if (!(current = __atomic_exchange_n( &event->signaled, 1, __ATOMIC_SEQ_CST )))
+-        futex_wake( &event->signaled, INT_MAX );
++        wake_epoch();
+ 
+     /* Try to give other threads a chance to wake up. Hopefully erring on this
+      * side is the better thing to do... */
+@@ -657,7 +691,7 @@
+     if (!--mutex->count)
+     {
+         __atomic_store_n( &mutex->tid, 0, __ATOMIC_SEQ_CST );
+-        futex_wake( &mutex->tid, INT_MAX );
++        wake_epoch();
+     }
+ 
+     put_object( &obj );
+@@ -703,10 +737,8 @@
+ static NTSTATUS do_single_wait( int *addr, int val, const struct timespec64 *end, clockid_t clock_id,
+                                 BOOLEAN alertable )
+ {
+-    struct futex_waitv futexes[2];
+-    int ret;
+-
+-    futex_vector_set( &futexes[0], addr, val );
++    int *epoch = epoch_word();
++    int ret, epoch_val;
+ 
+     if (alertable)
+     {
+@@ -714,22 +746,20 @@
+ 
+         if (__atomic_load_n( apc_futex, __ATOMIC_SEQ_CST ))
+             return STATUS_USER_APC;
++    }
+ 
+-        futex_vector_set( &futexes[1], apc_futex, 0 );
++    epoch_val = __atomic_load_n( epoch, __ATOMIC_SEQ_CST );
++    if (__atomic_load_n( addr, __ATOMIC_SEQ_CST ) != val)
++        return STATUS_PENDING;
+ 
+-        ret = futex_wait_multiple( futexes, 2, end, clock_id );
++    ret = futex_wait_epoch( epoch, epoch_val, end, clock_id );
+ 
+-        if (__atomic_load_n( apc_futex, __ATOMIC_SEQ_CST ))
+-            return STATUS_USER_APC;
+-    }
+-    else
+-    {
+-        ret = futex_wait_multiple( futexes, 1, end, clock_id );
+-    }
++    if (alertable && __atomic_load_n( ntdll_get_thread_data()->fsync_apc_futex, __ATOMIC_SEQ_CST ))
++        return STATUS_USER_APC;
+ 
+     if (!ret)
+         return 0;
+-    else if (ret < 0 && errno == ETIMEDOUT)
++    else if (errno == ETIMEDOUT)
+         return STATUS_TIMEOUT;
+     else
+         return STATUS_PENDING;
+@@ -751,15 +781,13 @@
+     int current_tid = 0;
+ #define CURRENT_TID (current_tid ? current_tid : (current_tid = GetCurrentThreadId()))
+ 
+-    struct futex_waitv futexes[MAXIMUM_WAIT_OBJECTS + 1];
+     struct fsync objs[MAXIMUM_WAIT_OBJECTS];
+     int prev_pids[MAXIMUM_WAIT_OBJECTS];
+     int has_fsync = 0, has_server = 0;
+     clockid_t clock_id = 0;
+     struct timespec64 end;
+-    int dummy_futex = 0;
++    int epoch_val;
+     BOOL waited = FALSE;
+-    DWORD waitcount;
+     int i, ret;
+ 
+     /* Grab the APC futex if we don't already have it. */
+@@ -821,6 +849,11 @@
+                     goto userapc;
+             }
+ 
++            /* Read the epoch before scanning the objects, see wake_epoch().
++             * A server object has no local word to watch; the epoch still wakes
++             * us when the server signals one through fsync_set_event(). */
++            epoch_val = __atomic_load_n( epoch_word(), __ATOMIC_SEQ_CST );
++
+             for (i = 0; i < count; i++)
+             {
+                 struct fsync *obj = &objs[i];
+@@ -848,7 +881,6 @@
+                                 return i;
+                             }
+                         }
+-                        futex_vector_set( &futexes[i], &semaphore->count, 0 );
+                         break;
+                     }
+                     case FSYNC_MUTEX:
+@@ -889,7 +921,6 @@
+                             /* Someone else grabbed the mutex while we are waiting, re-register us as waiter. */
+                             __sync_val_compare_and_swap( &mutex->last_pid, 0, current_pid );
+                         }
+-                        futex_vector_set( &futexes[i], &mutex->tid, tid );
+                         break;
+                     }
+                     case FSYNC_AUTO_EVENT:
+@@ -910,7 +941,6 @@
+                             put_objects( objs, count );
+                             return i;
+                         }
+-                        futex_vector_set( &futexes[i], &event->signaled, 0 );
+                         break;
+                     }
+                     case FSYNC_MANUAL_EVENT:
+@@ -929,7 +959,6 @@
+                             put_objects( objs, count );
+                             return i;
+                         }
+-                        futex_vector_set( &futexes[i], &event->signaled, 0 );
+                         break;
+                     }
+                     default:
+@@ -937,19 +966,7 @@
+                         assert(0);
+                     }
+                 }
+-                else
+-                {
+-                    /* Avoid breaking things entirely. */
+-                    futex_vector_set( &futexes[i], &dummy_futex, dummy_futex );
+-                }
+-            }
+-
+-            if (alertable)
+-            {
+-                /* We already checked if it was signaled; don't bother doing it again. */
+-                futex_vector_set( &futexes[i++], ntdll_get_thread_data()->fsync_apc_futex, 0 );
+             }
+-            waitcount = i;
+ 
+             /* Looks like everything is contended, so wait. */
+ 
+@@ -965,7 +982,7 @@
+                 return STATUS_TIMEOUT;
+             }
+ 
+-            ret = futex_wait_multiple( futexes, waitcount, timeout ? &end : NULL, clock_id );
++            ret = futex_wait_epoch( epoch_word(), epoch_val, timeout ? &end : NULL, clock_id );
+ 
+             /* FUTEX_WAIT_MULTIPLE can succeed or return -EINTR, -EAGAIN,
+              * -EFAULT/-EACCES, -ETIMEDOUT. In the first three cases we need to
+diff --git a/server/fsync.c b/server/fsync.c
+--- a/server/fsync.c
++++ b/server/fsync.c
+@@ -51,14 +51,33 @@
+ #ifndef __NR_futex_waitv
+ #define __NR_futex_waitv 449
+ #endif
++#ifndef FUTEX_WAKE
++#define FUTEX_WAKE 1
++#endif
++
++/* shm index 0 is never handed out to an object, so both sides use it as the wake
++ * epoch: signallers bump it and waiters sleep on it. */
++#define FSYNC_EPOCH_SHM_IDX 0
++
++#define FSYNC_SHM_NAME "fsync.shm"
+ 
+ int do_fsync_cached = -1;
+ 
+ int fsync_check_support(void)
+ {
+ #ifdef __linux__
++#ifdef __ANDROID__
++    /* Android's app seccomp filter traps futex_waitv, so waits use the shared
++     * epoch with the classic futex call. Enable fsync by default and keep
++     * WINEFSYNC=0 as the escape hatch. */
++    syscall( __NR_futex, NULL, FUTEX_WAKE, 0, NULL, 0, 0 );
++    if (errno == ENOSYS || errno == EPERM) return 0;
++    if (getenv( "WINEFSYNC" ) && !atoi( getenv( "WINEFSYNC" ) )) return 0;
++    return 1;
++#else
+     syscall( __NR_futex_waitv, 0, 0, 0, 0, 0 );
+     return getenv( "WINEFSYNC" ) && atoi(getenv( "WINEFSYNC" )) && errno != ENOSYS && errno != EPERM;
++#endif
+ #else
+     return 0;
+ #endif
+@@ -81,8 +100,13 @@
+ static void shm_cleanup(void)
+ {
+     close( shm_fd );
++#ifdef __ANDROID__
++    if (unlinkat( config_dir_fd, shm_name, 0 ) == -1)
++        perror( "unlinkat" );
++#else
+     if (shm_unlink( shm_name ) == -1)
+         perror( "shm_unlink" );
++#endif
+ }
+ 
+ void fsync_init(void)
+@@ -92,6 +116,18 @@
+     if (fstat( config_dir_fd, &st ) == -1)
+         fatal_error( "cannot stat config dir\n" );
+ 
++#ifdef __ANDROID__
++    /* Bionic has no POSIX shared memory. A file in the config directory is the
++     * same shared mapping, and both sides already agree on that directory. */
++    strcpy( shm_name, FSYNC_SHM_NAME );
++
++    if (!unlinkat( config_dir_fd, shm_name, 0 ))
++        fprintf( stderr, "fsync: warning: a previous shm file %s was not properly removed\n", shm_name );
++
++    shm_fd = openat( config_dir_fd, shm_name, O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0644 );
++    if (shm_fd == -1)
++        perror( "openat" );
++#else
+     if (st.st_ino != (unsigned long)st.st_ino)
+         sprintf( shm_name, "/wine-%lx%08lx-fsync", (unsigned long)((unsigned long long)st.st_ino >> 32), (unsigned long)st.st_ino );
+     else
+@@ -103,6 +139,7 @@
+     shm_fd = shm_open( shm_name, O_RDWR | O_CREAT | O_EXCL, 0644 );
+     if (shm_fd == -1)
+         perror( "shm_open" );
++#endif
+ 
+     shm_addrs = calloc( 128, sizeof(shm_addrs[0]) );
+     shm_addrs_size = 128;
+@@ -310,7 +347,15 @@
+ 
+ static inline int futex_wake( int *addr, int val )
+ {
+-    return syscall( __NR_futex, addr, 1, val, NULL, 0, 0 );
++    return syscall( __NR_futex, addr, FUTEX_WAKE, val, NULL, 0, 0 );
++}
++
++static void wake_epoch(void)
++{
++    int *epoch = get_shm( FSYNC_EPOCH_SHM_IDX );
++
++    __atomic_add_fetch( epoch, 1, __ATOMIC_SEQ_CST );
++    futex_wake( epoch, INT_MAX );
+ }
+ 
+ /* shm layout for events or event-like objects. */
+@@ -327,7 +372,7 @@
+     struct fsync_event *event = get_shm( shm_idx );
+ 
+     if (!__atomic_exchange_n( &event->signaled, 1, __ATOMIC_SEQ_CST ))
+-        futex_wake( &event->signaled, INT_MAX );
++        wake_epoch();
+ }
+ 
+ void fsync_reset_event( unsigned int shm_idx )
+@@ -354,7 +399,7 @@
+ 
+     mutex->tid = ~0;
+     mutex->count = 0;
+-    futex_wake( &mutex->tid, INT_MAX );
++    wake_epoch();
+ }
+ 
+ DECL_HANDLER(fsync_free_shm_idx)
