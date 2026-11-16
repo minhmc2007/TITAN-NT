@@ -19,6 +19,7 @@
 #define NT_LOCK_SPIN_NS 2000u
 #define NT_LOCK_SLEEP_NS 2000000ull
 #define NT_EPOCH_FALLBACK_NS 1000000ull
+#define NT_BLOCK_NS 50000ull
 
 struct nt_obj_ref {
   uint32_t pid;
@@ -492,15 +493,19 @@ static uint32_t nt_wait_multi(struct nt_arena *a, const nt_handle *hs,
         nt_unlock(a);
         continue;
       }
-      if (spin) {
-        nt_lock(a);
-        if (++first->blocks >= NT_SPIN_BLOCK_LIMIT)
-          first->spin_ns = 0;
-        nt_unlock(a);
-      }
+      uint64_t t0 = titan_monotonic_ns();
       nt_wait_word(&a->waiters[wi].word, 1, deadline);
+      /* A handoff that only missed the spin window is not a sleep: counting it
+         would zero the budget on every frame-fence hit. */
+      int slept = spin == 0 || titan_monotonic_ns() - t0 > NT_BLOCK_NS;
       nt_lock(a);
       nt_waiter_disarm(a, wi);
+      if (slept) {
+        if (++first->blocks >= NT_SPIN_BLOCK_LIMIT)
+          first->spin_ns = 0;
+      } else {
+        first->blocks = 0;
+      }
       nt_unlock(a);
     } else {
       uint64_t slice = titan_monotonic_ns() + NT_EPOCH_FALLBACK_NS;
