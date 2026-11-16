@@ -2,6 +2,8 @@
 
 Built by `ci-deps-cpu.yml` run 43846262676 (Wine + FEX) and `ci-m2-win.yml` run
 43850212825 (device bundle `titan-m2-wine`, `titan-m2-wine.tar.gz`, 181 MB).
+The same tree was republished by run 43887571813 as the `m2-bundle` prerelease;
+the device results below are from that asset (181,484,985 bytes).
 
 ## Static invariants
 
@@ -20,27 +22,56 @@ Built by `ci-deps-cpu.yml` run 43846262676 (Wine + FEX) and `ci-m2-win.yml` run
 | --- | --- |
 | Win64 executable, 100% | 10/10 checks, 0 failures |
 | Win32 WoW64 executable, 100% | 10/10 checks, 0 failures |
-| `.foz` disk cache on F2FS | **open** — see below |
-| 0 `wineserver` socket hops in `NtWait*` | 146 ns (Win64) / 326 ns (Win32) per signalled wait |
+| `.foz` disk cache on F2FS | 6 files, 7.6 MB, written to the prefix on `f2fs` |
+| 0 `wineserver` socket hops in `NtWait*` | 144 ns (Win64) / 319 ns (Win32) per signalled wait |
 
 The gate's "under `forkd`" is not applicable to this path: `forkd` is the ART
 thread shim for the APK host, and Wine's loader never enters it. Both
 executables ran in a Termux app process (`untrusted_app`, app seccomp active),
-which is the domain the gate is about.
+which is the domain the gate is about. All four clauses are met.
 
 ## Wait latency
 
 `WaitForSingleObject` on an already-signalled manual event, 200,000 rounds, no
 CPU pinning:
 
-| Bits | Server-side sync (run 43839750678) | fsync (run 43850212825) |
-| --- | --- | --- |
-| 64 | 51,062 ns | 146 ns |
-| 32 | 53,204 ns | 326 ns |
+| Bits | Server-side sync (run 43839750678) | fsync (run 43850212825) | fsync, second run |
+| --- | --- | --- | --- |
+| 64 | 51,062 ns | 146 ns | 144 ns |
+| 32 | 53,204 ns | 326 ns | 319 ns |
 
-51 us is a wineserver socket round trip; 146 ns is the in-process object scan.
+51 us is a wineserver socket round trip; 144 ns is the in-process object scan.
 The 32-bit path is 2.2x the 64-bit one because the i686 binary reaches the same
-code through WoW64 and FEX.
+code through WoW64 and FEX. The two fsync columns are separate device runs, so
+the 1-2% spread is run-to-run noise rather than a code change.
+
+## `.foz` disk cache
+
+FEX only writes the cache when `FEX_DISKCACHE=1` is exported; without it the
+translated blocks live and die in memory, which is why the first hello-world run
+left no files. The benchmark suite (`ci-bench.yml` run 43856591013) was run with
+the switch on, and the cache appeared inside the prefix:
+
+| Path (relative to `$WINEPREFIX`) | Files | Size |
+| --- | --- | --- |
+| `drive_c/windows/DiskCache/85172ccfbd1234d5/` | 2 | 4.8 MB |
+| `drive_c/users/steamuser/AppData/Local/fex-emu/DiskCache/85172ccfbd1234d5/` | 4 | 2.8 MB |
+
+Each entry is a `RWCacheDB_<hash>.foz` plus a `RWCacheDB_<hash>_idx.foz` index,
+written after the run finished. `stat -f` on the prefix reports `f2fs`, so the
+gate's "on F2FS" holds; the cache is not on a tmpfs or an emulated filesystem.
+The two roots are FEX's Windows data directory (`%LOCALAPPDATA%\fex-emu`) and
+the Wine-side system cache, both inside the same prefix.
+
+## Real x86 applications
+
+Beyond the sync harness, stock 32-bit and 64-bit x86 PE hello-world binaries run
+under WoW64 plus FEX from the same prefix. That exercises the PE loader,
+`kernel32`/`ntdll` thunks and translation for both bitnesses, not just the wait
+primitives the harness measures. Measured throughput against the native AArch64
+baseline is in `docs/bench.md`; the median `x86_64` result is 40-100% of native
+depending on whether the workload is bound on memory or on translated control
+flow.
 
 ## fsync on Android
 

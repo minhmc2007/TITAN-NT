@@ -178,6 +178,56 @@ jq -c 'select(.bench=="cpu") | {name, ops_per_s, cpu}' bench-results.jsonl
 jq -r 'select(.name=="int_mt_8t") | .scaling' bench-results.jsonl
 ```
 
+## Baseline, Galaxy A55
+
+One run on the A55 (`SM-A556E`, `s5e8845`), bundle from the `m2-bundle`
+prerelease, fresh prefix, `FEX_DISKCACHE=1`, no CPU pinning, device not
+thermally controlled. Medians of the default repeats. Percentages are relative
+to the native `aarch64` column.
+
+| Workload | `aarch64` | `x86_64` | % | `i686` | % |
+| --- | --- | --- | --- | --- | --- |
+| `branch_branchless` | 2,418 MB/s | 2,600 MB/s | 107.6 | 2,237 MB/s | 92.5 |
+| `mem_stream_32m` | 8,297 MB/s | 8,858 MB/s | 106.8 | 6,712 MB/s | 80.9 |
+| `mem_stream_4k` | 61,666 MB/s | 53,735 MB/s | 87.1 | 49,380 MB/s | 80.1 |
+| `int_alu_dependent` | 2.03 G/s | 1.59 G/s | 78.4 | 1.69 G/s | 83.5 |
+| `branch_dependent` | 254.7 MB/s | 150.9 MB/s | 59.3 | 159.4 MB/s | 62.6 |
+| `int_mt_1t` | 7.08 G/s | 3.32 G/s | 47.0 | 3.61 G/s | 50.9 |
+| `int_mt_8t` | 30.01 G/s (4.24x) | 13.71 G/s (4.12x) | 45.7 | 11.11 G/s (3.08x) | 37.0 |
+| `int_alu_independent` | 6.79 G/s | 2.98 G/s | 43.8 | 3.64 G/s | 53.5 |
+| `fp_double_fma` | 1.02 G/s | 0.42 G/s | 40.6 | 0.46 G/s | 44.8 |
+| `zstd_decompress` | 1,823 MB/s | 777 MB/s | 42.6 | 470 MB/s | 25.8 |
+| `zstd_compress` | 186.5 MB/s | 84.1 MB/s | 45.1 | 53.6 MB/s | 28.7 |
+| `lz4_decompress` | 3,539 MB/s | 689 MB/s | 19.5 | 853 MB/s | 24.1 |
+
+Reading it:
+
+- The translation tax on scalar ALU code is 2.1-2.3x (`int_mt_1t`,
+  `int_alu_independent`). That is one x86 instruction expanding to roughly two
+  AArch64 instructions plus register moves, and it is the number to quote.
+- Bandwidth-bound work is unaffected (`mem_stream_*` 80-107%): DRAM and L1 do
+  not care which ISA issued the load. Values above 100% are llvm-mingw's
+  AArch64 codegen against FEX's register allocation on a loop that is waiting on
+  memory anyway, not a translation win.
+- Unpredictable control flow is where translation costs most
+  (`branch_dependent` 59-63%, `lz4_decompress` 19.5%). Each translated branch is
+  a guest-PC lookup, so a mispredict pays the guest's mispredict plus the
+  dispatch.
+- Thread scaling survives translation: 4.12x on `x86_64` against 4.24x native
+  on 4x A78 + 4x A55. `i686` at 3.08x is the only real anomaly.
+- Two rows are not trustworthy as multipliers. `lz4_decompress` and
+  `int_alu_independent` are both *faster* on `i686` than on `x86_64`, which
+  cannot happen if the gap were a translation-layer cost, since both go through
+  one FEX layer. Treat those `x86_64` figures as a codegen pathology and re-run
+  with `--only` before quoting them.
+- `zstd_compress` on `x86_64` reported a 3,060 ms `max_ns` against a median in
+  the tens of ms, so one repeat was contaminated (throttle or contention). The
+  median stands; the spread does not.
+
+Peak RSS on the same run was 6.9 MB native, 14.3 MB `x86_64`, 17.5 MB `i686`.
+That is the JIT code cache, and `peak_rss_kb` is a process-wide high-water mark
+that only rises across a run, so it is not a per-workload figure.
+
 ## Build pins
 
 `ci-bench.yml` fetches release source tarballs inside CI; nothing is vendored.
