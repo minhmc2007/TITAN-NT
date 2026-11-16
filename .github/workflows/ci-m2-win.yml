@@ -12,7 +12,7 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: read
+  contents: write
   actions: read
 
 env:
@@ -88,3 +88,18 @@ jobs:
           path: dist/titan-m2-wine.tar.gz
           if-no-files-found: error
           retention-days: 30
+
+      # Release assets are a stable public URL, so the bundle can be fetched with
+      # a resumable or mirrored client instead of the artifact endpoint.
+      - name: Publish prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag=m2-bundle
+          gh release view "$tag" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 ||
+            gh release create "$tag" -R "$GITHUB_REPOSITORY" --prerelease \
+              --title "M2 device bundle" \
+              --notes "Wine ARM64EC plus FEX for the A55. Rebuilt by ci-m2-win run $GITHUB_RUN_ID; the asset is replaced on every run."
+          gh release upload "$tag" -R "$GITHUB_REPOSITORY" dist/titan-m2-wine.tar.gz --clobber
+          gh release view "$tag" -R "$GITHUB_REPOSITORY" --json assets --jq '.assets[] | "\(.name) \(.size)"'
