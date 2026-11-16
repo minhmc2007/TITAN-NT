@@ -1,12 +1,15 @@
+#include <stdlib.h>
 #include <sys/auxv.h>
 #include <time.h>
 #include <unistd.h>
 
+#include "../common/titan_affinity.h"
 #include "../common/titan_log.h"
 #include "../common/titan_sys.h"
 #include "../common/titan_time.h"
 #include "../hal_shim/titan_signal.h"
 #include "../hal_shim/x18_guard.h"
+#include "../ntsync/titan_ntsync.h"
 
 #define FORKD_MAGIC 0x544954414e464430ull
 #define FORKD_ACK 0x4644524bull
@@ -180,6 +183,48 @@ static int probe_lowva(uint64_t addr) {
   return ok;
 }
 
+static void probe_affinity(void) {
+  uint64_t orig = 0;
+  int read_ok = titan_sched_getaffinity(0, sizeof(orig), &orig) == 0;
+  int perf = 0, eff = 0;
+  if (read_ok) {
+    perf = titan_pin_cluster(1) == 0 && titan_cluster_of_self() == 1;
+    eff = titan_pin_cluster(0) == 0 && titan_cluster_of_self() == 0;
+    titan_sched_setaffinity(0, sizeof(orig), &orig);
+  }
+
+  struct titan_buf b;
+  char storage[160];
+  titan_buf_init(&b, storage, sizeof(storage));
+  titan_buf_str(&b, "{\"test\":\"forkd_affinity\",\"perf\":");
+  titan_buf_str(&b, perf ? "true" : "false");
+  titan_buf_str(&b, ",\"eff\":");
+  titan_buf_str(&b, eff ? "true" : "false");
+  titan_buf_str(&b, "}");
+  titan_buf_emit(&b);
+}
+
+static struct nt_arena *start_ntsync(void) {
+  struct nt_arena *a = nt_arena_create();
+  if (!a)
+    return 0;
+  nt_process_register(a, (uint32_t)titan_getpid());
+
+  char fdbuf[16];
+  u64_dec((uint64_t)nt_arena_fd(a), fdbuf);
+  titan_guard_call((void *)setenv, (long)(uintptr_t)"TITAN_NTSYNC_FD",
+                   (long)(uintptr_t)fdbuf, 1, 0, 0, 0);
+
+  struct titan_buf b;
+  char storage[160];
+  titan_buf_init(&b, storage, sizeof(storage));
+  titan_buf_str(&b, "{\"test\":\"forkd_ntsync\",\"fd\":");
+  titan_buf_u64(&b, (uint64_t)nt_arena_fd(a));
+  titan_buf_str(&b, "}");
+  titan_buf_emit(&b);
+  return a;
+}
+
 static void hold_seconds(uint64_t seconds) {
   struct titan_timespec nap = {0, 100000000};
   uint64_t until = titan_monotonic_ns() + seconds * 1000000000ull;
@@ -301,6 +346,13 @@ int main(int argc, char **argv) {
   ok &= probe_lowva(0x10000);
   ok &= probe_lowva(0x10000000);
   ok &= probe_lowva(0x100000000ull);
+  probe_affinity();
+
+  struct nt_arena *nt = start_ntsync();
+  if (!nt) {
+    titan_write_str(2, "ntsync arena failed\n");
+    ok = 0;
+  }
 
   long fd = titan_memfd_create("titan-forkd", 0);
   if (fd < 0 || titan_ftruncate((int)fd, 4096) != 0) {

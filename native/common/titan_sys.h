@@ -17,6 +17,7 @@
 #define TITAN_SYS_setitimer 103
 #define TITAN_SYS_clock_gettime 113
 #define TITAN_SYS_sched_setaffinity 122
+#define TITAN_SYS_sched_getaffinity 123
 #define TITAN_SYS_tgkill 131
 #define TITAN_SYS_socketpair 199
 #define TITAN_SYS_getpid 172
@@ -77,6 +78,10 @@ struct titan_futex_waitv {
   uint32_t flags;
   uint32_t reserved;
 };
+
+#ifdef TITAN_HOST_TEST
+#include "titan_sys_host.h"
+#else
 
 static inline long titan_syscall6(long nr, long a0, long a1, long a2, long a3,
                                   long a4, long a5) {
@@ -211,10 +216,17 @@ static inline long titan_sched_setaffinity(long pid, size_t len,
                         (long)(uintptr_t)mask, 0, 0, 0);
 }
 
+static inline long titan_sched_getaffinity(long pid, size_t len, void *mask) {
+  return titan_syscall6(TITAN_SYS_sched_getaffinity, pid, (long)len,
+                        (long)(uintptr_t)mask, 0, 0, 0);
+}
+
 static inline long titan_socketpair(int domain, int type, int protocol,
                                     int *sv) {
   return titan_syscall6(TITAN_SYS_socketpair, domain, type, protocol,
                         (long)(uintptr_t)sv, 0, 0);
 }
+
+#endif /* TITAN_HOST_TEST */
 
 #endif

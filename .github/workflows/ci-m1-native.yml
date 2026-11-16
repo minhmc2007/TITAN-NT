@@ -50,6 +50,8 @@ jobs:
           cxxflags=(-std=c++20 -Wno-deprecated-register -fno-exceptions -fno-rtti)
 
           for f in native/common/titan_log.c native/common/titan_time.c \
+                   native/common/titan_affinity.c \
+                   native/ntsync/titan_ntsync.c \
                    native/hal_shim/x18_guard.c \
                    native/hal_shim/x18_guard_asm.S \
                    native/hal_shim/sig_trampoline.S \
@@ -74,6 +76,7 @@ jobs:
 
           "$cc" -pie -Wl,--dynamic-linker=/system/bin/linker64 -o dist/m1/libtitan_forkd.so \
             build/m1/forkd.o build/m1/titan_log.o build/m1/titan_time.o \
+            build/m1/titan_ntsync.o build/m1/titan_affinity.o \
             build/m1/x18_guard.o build/m1/x18_guard_asm.o \
             build/m1/sig_trampoline.o build/m1/titan_signal.o
 

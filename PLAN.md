@@ -141,6 +141,11 @@ titan-nt/
   1. Fork/configure upstream `proton-wine` (ARM64EC Bionic, `-ffixed-x18 -fno-sanitize=shadow-call-stack`) and `FEX` (`2609+`, `SupportsRCPC=false`, `SupportsFlagM2=false`, `AVX=false`, `FEX_DISKCACHE=1`) via `.github/workflows/ci-deps-cpu.yml` (with disk cleanup + `ccache` + GitHub Release artifact caching).
   2. Implement `titan_ntsync` (`futex_waitv`), `wineserver-lite`, live F2FS case-insensitive VFS, A78/A55 cluster pinning, and build Win32/Win64 multi-threaded CLI test `.exe`s in CI (`mingw-w64`).
   3. Commit, push, watch CI until green.
+- **Acceptance items (from the M1 review, binding):**
+  1. `titan_ntsync` maps `KEVENT`/`KMUTANT`/`KSEMAPHORE` to generation-tagged slots in one `memfd` arena; handles carry slot+generation so a recycled slot never satisfies a stale handle.
+  2. `NtWaitForMultipleObjects` with `bWaitAll` performs one atomic check-and-acquire pass: no semaphore decrement and no auto-reset event consumption unless every handle is acquirable in the same critical section.
+  3. Cross-process waits use `FUTEX_WAIT_BITSET` without `FUTEX_PRIVATE_FLAG`; a mutex whose owner process died returns `WAIT_ABANDONED` and is acquired by the waiter.
+  4. Per-object spin budget is wall-clock (`CNTVCT_EL0`, 2 us) with `LDAXR`/`WFE`; two consecutive waits that sleep drop that object's budget to 0.
 - **Stop & Handover:** **STOP** and give `gh run download` + `adb` run commands for headless `cmd.exe` + Win32/Win64 test harness on Galaxy A55.
 - **Exit Gate:** Both Win64 and Win32 WoW64 test executables pass 100% under `forkd` on A55, generating `.foz` disk cache on F2FS with 0 `wineserver` socket hops in `NtWait*` hot paths.
 

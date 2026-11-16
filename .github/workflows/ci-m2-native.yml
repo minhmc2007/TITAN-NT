@@ -1,0 +1,119 @@
+name: ci-m2-native
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-m2-native-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  NDK_VERSION: 30.0.16248370
+
+jobs:
+  host-selftest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build host sync selftest
+        run: |
+          set -euo pipefail
+          mkdir -p build/m2-host
+          cc -DTITAN_HOST_TEST -O2 -g -Wall -Wextra -Werror -Inative \
+            tests/m2_ntsync_test.c native/ntsync/titan_ntsync.c \
+            native/common/titan_time.c native/common/titan_log.c \
+            native/common/titan_affinity.c \
+            -o build/m2-host/ntsync_selftest
+
+      - name: Run host sync selftest
+        run: |
+          set -euo pipefail
+          timeout 120 ./build/m2-host/ntsync_selftest | tee build/m2-host/selftest.jsonl
+          grep -q '"test":"ntsync_summary".*"failures":0' build/m2-host/selftest.jsonl
+
+  build-arm64:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Locate NDK
+        run: |
+          set -euo pipefail
+          echo "NDK=/usr/local/lib/android/sdk/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+          test -x "/usr/local/lib/android/sdk/ndk/$NDK_VERSION/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" \
+            || { echo "NDK $NDK_VERSION missing from runner image"; exit 1; }
+
+      - name: Build M2 binaries
+        run: |
+          set -euo pipefail
+          mkdir -p dist/m2 build/m2
+          BIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          cc="$BIN/aarch64-linux-android34-clang"
+          flags=(-O2 -g -Wall -Wextra -Werror
+                 -ffixed-x18 -fno-sanitize=shadow-call-stack
+                 -march=armv8.2-a+lse -fno-omit-frame-pointer
+                 -Inative)
+
+          for f in native/common/titan_log.c native/common/titan_time.c \
+                   native/common/titan_affinity.c \
+                   native/ntsync/titan_ntsync.c \
+                   native/hal_shim/x18_guard.c \
+                   native/hal_shim/x18_guard_asm.S \
+                   native/hal_shim/sig_trampoline.S \
+                   native/hal_shim/titan_signal.c \
+                   native/forkd/forkd.c \
+                   tests/m2_ntsync_test.c; do
+            "$cc" "${flags[@]}" -c "$f" -o "build/m2/$(basename "${f%.*}").o"
+          done
+
+          "$cc" -pie -o dist/m2/m2_ntsync_test \
+            build/m2/m2_ntsync_test.o build/m2/titan_log.o \
+            build/m2/titan_time.o build/m2/titan_ntsync.o \
+            build/m2/titan_affinity.o
+
+          "$cc" -pie -Wl,--dynamic-linker=/system/bin/linker64 -o dist/m2/libtitan_forkd.so \
+            build/m2/forkd.o build/m2/titan_log.o build/m2/titan_time.o \
+            build/m2/titan_ntsync.o build/m2/titan_affinity.o \
+            build/m2/x18_guard.o build/m2/x18_guard_asm.o \
+            build/m2/sig_trampoline.o build/m2/titan_signal.o
+
+          "$BIN/llvm-readelf" -h -l dist/m2/libtitan_forkd.so > build/m2/forkd.elf.txt
+          grep -q 'Type:.*DYN' build/m2/forkd.elf.txt \
+            || { echo "libtitan_forkd.so is not a PIE"; exit 1; }
+          grep -q 'Requesting program interpreter: /system/bin/linker64' build/m2/forkd.elf.txt \
+            || { echo "libtitan_forkd.so has no Android dynamic linker"; exit 1; }
+
+      - name: Static x18 checks
+        run: |
+          set -euo pipefail
+          BIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          for f in dist/m2/m2_ntsync_test dist/m2/libtitan_forkd.so; do
+            node scripts/dso_x18_scan.mjs --expect-zero "$f"
+            "$BIN/llvm-objdump" -d "$f" > "build/m2/$(basename "$f").dis"
+          done
+          test "$(grep -cE '(str|stp)[[:space:]]+x18' build/m2/m2_ntsync_test.dis || true)" -eq 0 \
+            || { echo "unexpected x18 stores in m2_ntsync_test"; exit 1; }
+          test "$(grep -cE '(str|stp)[[:space:]]+x18' build/m2/libtitan_forkd.so.dis || true)" -eq 1 \
+            || { echo "unexpected x18 stores in forkd"; exit 1; }
+
+      - name: Checksums
+        run: |
+          set -euo pipefail
+          cd dist/m2
+          sha256sum m2_ntsync_test libtitan_forkd.so > sha256.txt
+          cat sha256.txt
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: m2-arm64-artifacts
+          path: dist/m2/
+          if-no-files-found: error
+          retention-days: 30
