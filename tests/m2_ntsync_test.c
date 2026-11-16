@@ -1,5 +1,6 @@
 #include <stdint.h>
 
+#include "common/titan_affinity.h"
 #include "common/titan_log.h"
 #include "common/titan_sys.h"
 #include "common/titan_time.h"
@@ -146,7 +147,7 @@ static void test_wait_any(void) {
 }
 
 static void test_wait_all_atomic(void) {
-  nt_handle sem = nt_object_create(g_arena, NT_SEMAPHORE, 1, 1, 0);
+  nt_handle sem = nt_object_create(g_arena, NT_SEMAPHORE, 1, 2, 0);
   nt_handle ev = nt_object_create(g_arena, NT_EVENT_AUTO, 0, 0, 0);
   nt_handle h[2] = {sem, ev};
 
