@@ -1,0 +1,32 @@
+From ad85a24b20792622b9aec5fc24321e89a7f7e187 Mon Sep 17 00:00:00 2001
+From: skywalker512 <houzhenhong@outlook.com>
+Date: Sun, 8 Nov 2026 13:07:33 +0800
+Subject: [PATCH] server: On Android, find the NLS directory from argv[0].
+
+Programs in an Android app's data directory run through the system linker
+(see the ntdll change), so /proc/self/exe names /system/bin/linker64 and
+the NLS directory computed from it does not exist. ntdll starts the server
+with its full path as argv[0], so use that, as on other platforms without
+/proc/self/exe.
+
+Amphora-Origin: new (targetSdk 36, 2026-11-08)
+Amphora-Upstream: android-only
+---
+ server/unicode.c | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/server/unicode.c b/server/unicode.c
+index bb39b55e50c..5b829bf1844 100644
+--- a/server/unicode.c
++++ b/server/unicode.c
+@@ -279,7 +279,9 @@ static char *get_nls_dir(void)
+ {
+     char *p, *dir, *ret;
+ 
+-#if defined(__linux__) || defined(__FreeBSD_kernel__) || defined(__NetBSD__)
++    /* On Android, app-private programs run through the system linker, so
++     * /proc/self/exe is the linker; use argv[0] there (the #else branch). */
++#if (defined(__linux__) && !defined(__ANDROID__)) || defined(__FreeBSD_kernel__) || defined(__NetBSD__)
+     dir = realpath( "/proc/self/exe", NULL );
+ #elif defined (__FreeBSD__) || defined(__DragonFly__)
+     static int pathname[] = { CTL_KERN, KERN_PROC, KERN_PROC_PATHNAME, -1 };

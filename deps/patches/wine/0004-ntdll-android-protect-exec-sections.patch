@@ -1,0 +1,155 @@
+From d41f6df03363c54990c230986919c4e694af15a6 Mon Sep 17 00:00:00 2001
+From: skywalker512 <houzhenhong@outlook.com>
+Date: Wed, 28 Oct 2026 13:48:53 +0900
+Subject: [PATCH] ntdll: protect relocation-free executable sections before
+ relocating
+
+On SELinux-enforcing Android, mprotecting a file-backed VMA executable is
+denied (execmod) once relocation writes gave it an anon_vma. Proton PE
+sections are file-page-aligned and back-to-back, so the kernel merges them
+into one VMA; relocation writes to .rdata/.data then poison the whole VMA,
+and the mprotect_exec anon-remap fallback copies every relocated image's
+.text into anonymous memory (~51 MiB in ~208 places in one AIO session).
+
+None of the 771 64-bit DLLs in the Proton build have relocations inside
+.text, so apply the final R+X protection of non-writable executable
+sections that no relocation block can touch before applying relocations:
+the mprotect runs while the mapping is still clean (execmod only checks
+COW'd file mappings), and the later protection pass simply re-applies the
+same protection. Sections a relocation may write (including an 8-byte
+DIR64 spilling over a page edge) keep the old order and may still take
+the anon-remap fallback, which stays in place.
+
+Measured in amphora (branch wip/cleanup @ 90ac3c4): ntdll!map_image_into_view
+is the sole source of anon-remap lines during AIO sessions on Y700.
+
+(cherry picked from commit a177c89b75b3797882fe0938d962caf25e3a317e)
+Amphora-Origin: amphora_old proton-wine a177c89b75b3 (wip/execmod-order)
+Amphora-Upstream: candidate for WineHQ (avoids execmod on any SELinux policy)
+---
+ dlls/ntdll/unix/virtual.c | 92 ++++++++++++++++++++++++++++++++++-----
+ 1 file changed, 82 insertions(+), 10 deletions(-)
+
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+index 3efac71e190..4e79f36471d 100644
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -3250,6 +3250,63 @@ static IMAGE_BASE_RELOCATION *process_relocation_block( char *page, IMAGE_BASE_R
+ }
+ 
+ 
++/***********************************************************************
++ *           section_vprot_size
++ *
++ * Size of the protected range of a section, as used by the final
++ * protection pass in map_image_into_view.
++ */
++static SIZE_T section_vprot_size( const IMAGE_SECTION_HEADER *sec, SIZE_T align_mask )
++{
++    if (sec->Misc.VirtualSize)
++        return ROUND_SIZE( sec->VirtualAddress, sec->Misc.VirtualSize, align_mask );
++    return ROUND_SIZE( sec->VirtualAddress, sec->SizeOfRawData, align_mask );
++}
++
++
++/***********************************************************************
++ *           section_vprot
++ *
++ * Final vprot of a section, as used by the protection pass in
++ * map_image_into_view.
++ */
++static BYTE section_vprot( const IMAGE_SECTION_HEADER *sec )
++{
++    BYTE vprot = VPROT_COMMITTED;
++
++    if (sec->Characteristics & IMAGE_SCN_MEM_READ)    vprot |= VPROT_READ;
++    if (sec->Characteristics & IMAGE_SCN_MEM_WRITE)   vprot |= VPROT_WRITECOPY;
++    if (sec->Characteristics & IMAGE_SCN_MEM_EXECUTE) vprot |= VPROT_EXEC;
++    return vprot;
++}
++
++
++/***********************************************************************
++ *           reloc_may_write_range
++ *
++ * Whether a base relocation block in dir may write into the image range
++ * [start, end). A block for page RVA p covers [p, p + 0x1000 + 8): an entry
++ * at offset 0xffc can relocate an 8-byte (DIR64) value spilling into the
++ * next page. Blocks are walked with the same bounds checks as the
++ * relocation loop in map_image_into_view.
++ */
++static BOOL reloc_may_write_range( char *base, const IMAGE_DATA_DIRECTORY *dir,
++                                   SIZE_T start, SIZE_T end, SIZE_T total_size )
++{
++    IMAGE_BASE_RELOCATION *rel, *rel_end;
++
++    if (!dir) return FALSE;
++    rel = (IMAGE_BASE_RELOCATION *)(base + dir->VirtualAddress);
++    rel_end = (IMAGE_BASE_RELOCATION *)((char *)rel + dir->Size);
++    while (rel && rel < rel_end - 1 && rel->SizeOfBlock && rel->VirtualAddress < total_size)
++    {
++        if (rel->VirtualAddress < end && rel->VirtualAddress + 0x1000 + 8 > start) return TRUE;
++        rel = (IMAGE_BASE_RELOCATION *)((char *)rel + rel->SizeOfBlock);
++    }
++    return FALSE;
++}
++
++
+ /***********************************************************************
+  *           map_image_into_view
+  *
+@@ -3448,12 +3505,34 @@ static NTSTATUS map_image_into_view( struct file_view *view, const UNICODE_STRIN
+         TRACE_(module)( "relocating %s dynamic base %lx -> %lx mapped at %p\n", debugstr_us(nt_name),
+                         (ULONG_PTR)image_info->base, (ULONG_PTR)image_info->map_addr, ptr );
+ 
++        dir = get_data_dir( nt, total_size, IMAGE_DIRECTORY_ENTRY_BASERELOC );
++
++        /* Relocations write into the file-backed sections, giving the VMA an
++         * anon_vma; SELinux execmod then refuses to mprotect it executable and
++         * mprotect_exec falls back to anon-remapping the whole range. Apply the
++         * final protection of non-writable executable sections that no
++         * relocation can touch while their pages are still clean, and before
++         * the ImageBase write below dirties the header page. */
++        for (i = 0; i < nt->FileHeader.NumberOfSections; i++)
++        {
++            SIZE_T size;
++
++            if ((sec[i].Characteristics & (IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_WRITE)) !=
++                IMAGE_SCN_MEM_EXECUTE)
++                continue;
++            size = section_vprot_size( &sec[i], align_mask );
++            if (reloc_may_write_range( ptr, dir, sec[i].VirtualAddress,
++                                       sec[i].VirtualAddress + size, total_size ))
++                continue;
++            set_vprot( view, ptr + sec[i].VirtualAddress, size, section_vprot( &sec[i] ));
++        }
++
+         if (nt->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC)
+             ((IMAGE_NT_HEADERS64 *)nt)->OptionalHeader.ImageBase = image_info->map_addr;
+         else
+             ((IMAGE_NT_HEADERS32 *)nt)->OptionalHeader.ImageBase = image_info->map_addr;
+ 
+-        if ((dir = get_data_dir( nt, total_size, IMAGE_DIRECTORY_ENTRY_BASERELOC )))
++        if (dir)
+         {
+             IMAGE_BASE_RELOCATION *rel = (IMAGE_BASE_RELOCATION *)(ptr + dir->VirtualAddress);
+             IMAGE_BASE_RELOCATION *end = (IMAGE_BASE_RELOCATION *)((char *)rel + dir->Size);
+@@ -3470,16 +3549,9 @@ static NTSTATUS map_image_into_view( struct file_view *view, const UNICODE_STRIN
+     for (i = 0; i < nt->FileHeader.NumberOfSections; i++)
+     {
+         SIZE_T size;
+-        BYTE vprot = VPROT_COMMITTED;
+-
+-        if (sec[i].Misc.VirtualSize)
+-            size = ROUND_SIZE( sec[i].VirtualAddress, sec[i].Misc.VirtualSize, align_mask );
+-        else
+-            size = ROUND_SIZE( sec[i].VirtualAddress, sec[i].SizeOfRawData, align_mask );
++        BYTE vprot = section_vprot( &sec[i] );
+ 
+-        if (sec[i].Characteristics & IMAGE_SCN_MEM_READ)    vprot |= VPROT_READ;
+-        if (sec[i].Characteristics & IMAGE_SCN_MEM_WRITE)   vprot |= VPROT_WRITECOPY;
+-        if (sec[i].Characteristics & IMAGE_SCN_MEM_EXECUTE) vprot |= VPROT_EXEC;
++        size = section_vprot_size( &sec[i], align_mask );
+ 
+         if (!set_vprot( view, ptr + sec[i].VirtualAddress, size, vprot ) && (vprot & VPROT_EXEC))
+             ERR( "failed to set %08x protection on %s section %.8s, noexec filesystem?\n",

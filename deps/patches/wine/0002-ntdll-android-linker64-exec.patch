@@ -1,0 +1,215 @@
+From d64ec180bff05371b9d8f1b13d9d40f47efbb29a Mon Sep 17 00:00:00 2001
+From: skywalker512 <houzhenhong@outlook.com>
+Date: Sun, 8 Nov 2026 12:55:17 +0800
+Subject: [PATCH] ntdll: On Android, run app-private executables through the
+ system linker.
+
+Apps targeting Android 10 (API 29) or later cannot execve() files in their
+data directory (SELinux W^X), which is where an app keeps Wine. The system
+dynamic linker can still run them: "/system/bin/linker64 prog args..."
+loads prog and starts it with argv[0] = prog.
+
+Route Wine's own process starts through that: the loader exec for new
+processes, the wineserver spawn and the Unix program paths of
+NtCreateUserProcess and __wine_unix_spawnvp. Only position-independent
+native ELF files outside the system partitions take the linker path, so
+system programs and scripts are executed as before. This works whatever the
+embedding app's targetSdk is, without an LD_PRELOAD exec hook.
+
+Bionic's posix_spawn() also reports success when the exec fails, so check
+that the file exists first; exec_wineserver() relies on an error to try the
+next location.
+
+Amphora-Origin: new (targetSdk 36, 2026-11-08)
+Amphora-Upstream: android-only
+---
+ dlls/ntdll/unix/loader.c       | 107 ++++++++++++++++++++++++++++++++-
+ dlls/ntdll/unix/process.c      |  14 ++++-
+ dlls/ntdll/unix/unix_private.h |   2 +
+ 3 files changed, 118 insertions(+), 5 deletions(-)
+
+diff --git a/dlls/ntdll/unix/loader.c b/dlls/ntdll/unix/loader.c
+index bea18023faa..bdfefcd91c1 100644
+--- a/dlls/ntdll/unix/loader.c
++++ b/dlls/ntdll/unix/loader.c
+@@ -248,13 +248,116 @@ static char *build_relative_path( const char *base, const char *from, const char
+     return ret;
+ }
+ 
++#if defined(__ANDROID__) && defined(HAVE_ELF_H) && (defined(__aarch64__) || defined(__x86_64__))
++
++/* Apps targeting Android 10 (API 29) or later may not execve() files in their
++ * data directory (SELinux W^X), but the system dynamic linker can run them:
++ * "linker64 /path/prog args..." loads prog and runs it with argv[0] = path. */
++static const char android_linker[] = "/system/bin/linker64";
++
++#ifdef __aarch64__
++#define ANDROID_ELF_MACHINE EM_AARCH64
++#else
++#define ANDROID_ELF_MACHINE EM_X86_64
++#endif
++
++static BOOL needs_android_linker( const char *path )
++{
++    static const char * const system_dirs[] =
++        { "/system/", "/system_ext/", "/vendor/", "/product/", "/odm/", "/apex/" };
++    Elf64_Ehdr ehdr;
++    unsigned int i;
++    ssize_t len;
++    int fd;
++
++    for (i = 0; i < ARRAY_SIZE(system_dirs); i++)
++        if (!strncmp( path, system_dirs[i], strlen( system_dirs[i] ))) return FALSE;
++
++    if ((fd = open( path, O_RDONLY | O_CLOEXEC )) == -1) return FALSE;
++    len = pread( fd, &ehdr, sizeof(ehdr), 0 );
++    close( fd );
++    /* the linker only loads position-independent native executables */
++    return len == sizeof(ehdr) && !memcmp( ehdr.e_ident, ELFMAG, SELFMAG ) &&
++           ehdr.e_ident[EI_CLASS] == ELFCLASS64 && ehdr.e_machine == ANDROID_ELF_MACHINE &&
++           ehdr.e_type == ET_DYN;
++}
++
++static size_t argv_count( char *const argv[] )
++{
++    size_t count = 0;
++    while (argv[count]) count++;
++    return count;
++}
++
++/* fill "linker64 path argv[1]... NULL" into count + 3 entries; the program
++ * gets path as argv[0]. No allocation: this runs in forked children. */
++static void make_linker_argv( char **linker_argv, const char *path, char *const argv[], size_t count )
++{
++    size_t i;
++
++    linker_argv[0] = (char *)android_linker;
++    linker_argv[1] = (char *)path;
++    for (i = 1; i < count; i++) linker_argv[i + 1] = argv[i];
++    linker_argv[i + 1] = NULL;
++}
++
++#define USE_ANDROID_LINKER
++#endif
++
++
++/***********************************************************************
++ *           unix_execv
++ *
++ * execv() that also runs app-private executables on Android.
++ */
++int unix_execv( const char *path, char *const argv[] )
++{
++#ifdef USE_ANDROID_LINKER
++    if (needs_android_linker( path ))
++    {
++        size_t count = argv_count( argv );
++        char *linker_argv[count + 3];
++
++        make_linker_argv( linker_argv, path, argv, count );
++        return execv( android_linker, linker_argv );
++    }
++#endif
++    return execv( path, argv );
++}
++
++
++/***********************************************************************
++ *           unix_spawn
++ *
++ * posix_spawn() with the current environment that also runs app-private
++ * executables on Android. Returns 0 or an errno value.
++ */
++int unix_spawn( pid_t *pid, const char *path, char *const argv[] )
++{
++#ifdef USE_ANDROID_LINKER
++    if (needs_android_linker( path ))
++    {
++        size_t count = argv_count( argv );
++        char *linker_argv[count + 3];
++
++        make_linker_argv( linker_argv, path, argv, count );
++        return posix_spawn( pid, android_linker, NULL, NULL, linker_argv, environ );
++    }
++    /* Bionic's posix_spawn() succeeds even when the exec fails; report a
++     * missing file so that callers trying several locations move on. */
++    if (access( path, X_OK )) return errno;
++#endif
++    return posix_spawn( pid, path, NULL, NULL, argv, environ );
++}
++
++
+ /* build a path to a binary and exec it */
+ static int build_path_and_exec( pid_t *pid, const char *dir, const char *name, char **argv )
+ {
+     int ret;
+ 
+     argv[0] = build_path( dir, name );
+-    ret = posix_spawn( pid, argv[0], NULL, NULL, argv, environ );
++    ret = unix_spawn( pid, argv[0], argv );
+     free( argv[0] );
+     return ret;
+ }
+@@ -510,7 +613,7 @@ static void preloader_exec( char **argv, WORD machine )
+     execv( argv[0], argv );
+     free( argv[0] );
+ #endif
+-    execv( argv[1], argv + 1 );
++    unix_execv( argv[1], argv + 1 );
+ }
+ 
+ /* exec the appropriate wine loader for the specified machine */
+diff --git a/dlls/ntdll/unix/process.c b/dlls/ntdll/unix/process.c
+index ef1ab9602d0..066d93bb836 100644
+--- a/dlls/ntdll/unix/process.c
++++ b/dlls/ntdll/unix/process.c
+@@ -465,6 +465,14 @@ static NTSTATUS spawn_process( const RTL_USER_PROCESS_PARAMETERS *params, int so
+ }
+ 
+ 
++/* exec argv[0], searching PATH when it has no directory part */
++static void exec_argv( char * const argv[] )
++{
++    if (strchr( argv[0], '/' )) unix_execv( argv[0], argv );
++    else execvp( argv[0], argv );
++}
++
++
+ /***********************************************************************
+  *           __wine_unix_spawnvp
+  */
+@@ -489,10 +497,10 @@ NTSTATUS WINAPI __wine_unix_spawnvp( char * const argv[], int wait )
+         signal( SIGPIPE, SIG_DFL );
+         if (!wait)
+         {
+-            if (!(pid = fork())) execvp( argv[0], argv ); /* in grandchild */
++            if (!(pid = fork())) exec_argv( argv ); /* in grandchild */
+             if (pid > 0) _exit(0); /* exit child if fork succeeded */
+         }
+-        else execvp( argv[0], argv );
++        else exec_argv( argv );
+ 
+         err = errno_to_status( errno );
+         write( fd[1], &err, sizeof(err) );
+@@ -614,7 +622,7 @@ static NTSTATUS fork_and_exec( OBJECT_ATTRIBUTES *attr, const char *unix_name, i
+                 fchdir( unixdir );
+                 close( unixdir );
+             }
+-            execv( unix_name, argv );
++            unix_execv( unix_name, argv );
+         }
+ 
+         if (pid <= 0)  /* grandchild if exec failed or child if fork failed */
+diff --git a/dlls/ntdll/unix/unix_private.h b/dlls/ntdll/unix/unix_private.h
+index fe0c0cb5940..e1d5649ae15 100644
+--- a/dlls/ntdll/unix/unix_private.h
++++ b/dlls/ntdll/unix/unix_private.h
+@@ -232,6 +232,8 @@ extern void *create_startup_info( const UNICODE_STRING *nt_image, ULONG process_
+                                   const RTL_USER_PROCESS_PARAMETERS *params,
+                                   const struct pe_image_info *pe_info, DWORD *info_size );
+ extern char *get_alternate_wineloader( WORD machine );
++extern int unix_execv( const char *path, char *const argv[] );
++extern int unix_spawn( pid_t *pid, const char *path, char *const argv[] );
+ extern NTSTATUS exec_wineloader( char **argv, int socketfd, const struct pe_image_info *pe_info );
+ extern NTSTATUS load_builtin( const struct pe_image_info *image_info, UNICODE_STRING *nt_name,
+                               ANSI_STRING *exp_name, USHORT machine, SECTION_IMAGE_INFORMATION *info,

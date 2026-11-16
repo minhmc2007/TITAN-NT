@@ -1,0 +1,35 @@
+From cc7a988069ab9e0405eb28de1ce541f6256cd134 Mon Sep 17 00:00:00 2001
+From: skywalker512 <houzhenhong@outlook.com>
+Date: Sun, 8 Nov 2026 12:42:50 +0800
+Subject: [PATCH] configure: Don't use the preloader on Android.
+
+Apps targeting Android 10 (API 29) or later cannot execve() files in their
+data directory (SELinux W^X), which is where an app keeps Wine. They run
+such programs through the system dynamic linker instead
+(/system/bin/linker64 prog args...), and the linker cannot load the static
+preloader. On 64-bit hosts ntdll already reserves the preloader's address
+ranges itself when there is no preloader (mmap_init).
+
+Amphora-Origin: new (targetSdk 36, 2026-11-08)
+Amphora-Upstream: android-only
+---
+ configure.ac | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/configure.ac b/configure.ac
+index 5376e11f353..f1d39a7896d 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -2140,6 +2140,12 @@ dnl **** Platform-specific checks ****
+ AC_SUBST(WINELOADER_PROGRAMS,"wine")
+ 
+ case $host_os in
++  linux-android*)
++    dnl Apps targeting Android 10 (API 29) or later cannot execve() files in their
++    dnl data directory, so they run them through the system dynamic linker, which
++    dnl cannot load the static preloader. On 64-bit, ntdll reserves the same areas
++    dnl at startup when there is no preloader (mmap_init).
++    ;;
+   linux*)
+     if test $HOST_ARCH != unknown
+     then

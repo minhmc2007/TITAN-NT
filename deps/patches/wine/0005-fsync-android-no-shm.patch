@@ -1,0 +1,58 @@
+From ca552f7c9c881350f3ea02330668fc849a27e34f Mon Sep 17 00:00:00 2001
+From: skywalker512 <houzhenhong@outlook.com>
+Date: Sun, 8 Nov 2026 04:36:03 +0800
+Subject: [PATCH] server, ntdll: Disable fsync on Android, Bionic has no
+ shm_open.
+
+fsync shares its memory by name through shm_open(). Keep it off on Android
+(the server never advertises it) until the memory is passed as an fd.
+
+Amphora-Origin: new (M1, 2026-11-07)
+Amphora-Upstream: android-only (Bionic has no shm_open; app seccomp also kills futex_waitv)
+---
+ dlls/ntdll/unix/fsync.c | 7 +++++++
+ server/fsync.c          | 9 ++++++++-
+ 2 files changed, 15 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/ntdll/unix/fsync.c b/dlls/ntdll/unix/fsync.c
+index 25d41cac793..6e0eac93e22 100644
+--- a/dlls/ntdll/unix/fsync.c
++++ b/dlls/ntdll/unix/fsync.c
+@@ -61,6 +61,13 @@ WINE_DEFAULT_DEBUG_CHANNEL(fsync);
+ #include "poppack.h"
+ 
+ int fsync_enabled;
++
++#ifdef __ANDROID__
++/* Bionic has no POSIX shared memory. fsync stays off on Android until it
++ * shares its memory through an fd passed by the server instead of a name. */
++static inline int shm_open( const char *name, int flags, mode_t mode ) { errno = ENOSYS; return -1; }
++static inline int shm_unlink( const char *name ) { errno = ENOSYS; return -1; }
++#endif
+ static int current_pid;
+ 
+ /* futex_waitv interface */
+diff --git a/server/fsync.c b/server/fsync.c
+index 7d3ec646f9e..0a26023711f 100644
+--- a/server/fsync.c
++++ b/server/fsync.c
+@@ -52,11 +52,18 @@
+ #define __NR_futex_waitv 449
+ #endif
+ 
++#ifdef __ANDROID__
++/* Bionic has no POSIX shared memory. fsync stays off on Android until it
++ * shares its memory through an fd passed by the server instead of a name. */
++static inline int shm_open( const char *name, int flags, mode_t mode ) { errno = ENOSYS; return -1; }
++static inline int shm_unlink( const char *name ) { errno = ENOSYS; return -1; }
++#endif
++
+ int do_fsync_cached = -1;
+ 
+ int fsync_check_support(void)
+ {
+-#ifdef __linux__
++#if defined(__linux__) && !defined(__ANDROID__)
+     syscall( __NR_futex_waitv, 0, 0, 0, 0, 0 );
+     return getenv( "WINEFSYNC" ) && atoi(getenv( "WINEFSYNC" )) && errno != ENOSYS && errno != EPERM;
+ #else

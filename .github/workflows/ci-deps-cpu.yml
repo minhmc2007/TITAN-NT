@@ -1,0 +1,250 @@
+name: ci-deps-cpu
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - deps/**
+      - .github/workflows/ci-deps-cpu.yml
+  workflow_dispatch:
+
+concurrency:
+  group: ci-deps-cpu-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  NDK_VERSION: 30.0.16248370
+  LLVM_MINGW: "20260721"
+  TARGET_TRIPLE: aarch64-linux-android30
+  WINE_TAG: proton-wine-11.0-2e
+  WINE_COMMIT: e60892cc2398b0a83c332a2078c7b85e47bdb42b
+  FEX_TAG: FEX-2611.1
+  FEX_COMMIT: 4f9c1f1e36443d22d7655477e34f51b95b685bf1
+
+jobs:
+  fex:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Free disk
+        run: |
+          set -euo pipefail
+          sudo rm -rf /usr/share/dotnet /usr/local/share/boost /opt/ghc \
+            /usr/local/lib/android/sdk/emulator /usr/local/lib/android/sdk/system-images
+          sudo apt-get clean
+          df -h / | tail -1
+
+      - name: Toolchain
+        run: |
+          set -euo pipefail
+          echo "ANDROID_NDK_HOME=/usr/local/lib/android/sdk/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+          echo "TOOLCHAIN_DIR=$RUNNER_TEMP/toolchain" >> "$GITHUB_ENV"
+
+      - uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/toolchain
+          key: toolchain-${{ env.LLVM_MINGW }}
+
+      - name: Install llvm-mingw
+        run: bash deps/toolchain.sh
+
+      - name: Fetch FEX
+        run: |
+          set -euo pipefail
+          git clone -q --depth 1 --branch "$FEX_TAG" https://github.com/FEX-Emu/FEX.git src/fex
+          cd src/fex
+          git rev-parse HEAD | grep -q "^$FEX_COMMIT" || { echo "FEX commit mismatch"; exit 1; }
+          git submodule update -q --init --depth 1 \
+            Source/Common/cpp-optparse External/fmt External/range-v3 \
+            External/rpmalloc External/unordered_dense External/xxhash
+          for p in ../../deps/patches/fex/*.patch; do
+            patch -p1 --forward --batch < "$p"
+          done
+          test -z "$(find . -name '*.rej')" || { echo "patch rejects"; exit 1; }
+
+      - name: Build FEX modules
+        env:
+          FEX_SRC: ${{ github.workspace }}/src/fex
+          FEX_OUT: ${{ github.workspace }}/build/fex
+          LLVM_MINGW_ROOT: ${{ runner.temp }}/toolchain/llvm-mingw
+          FEX_DESCRIBE: ${{ env.FEX_TAG }}
+        run: |
+          set -euo pipefail
+          bash deps/fex.sh
+          mkdir -p dist
+          tar -C build/fex/install -I 'zstd -T0 -6' -cf dist/fex-aarch64.tar.zst .
+          ls -l dist/
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: fex-aarch64
+          path: dist/fex-aarch64.tar.zst
+          if-no-files-found: error
+          retention-days: 30
+
+  wine:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Free disk
+        run: |
+          set -euo pipefail
+          sudo rm -rf /usr/share/dotnet /usr/local/share/boost /opt/ghc \
+            /usr/local/lib/android/sdk/emulator /usr/local/lib/android/sdk/system-images
+          sudo apt-get clean
+          df -h / | tail -1
+
+      - name: Toolchain
+        run: |
+          set -euo pipefail
+          echo "ANDROID_NDK_HOME=/usr/local/lib/android/sdk/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+          echo "TOOLCHAIN_DIR=$RUNNER_TEMP/toolchain" >> "$GITHUB_ENV"
+
+      - uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/toolchain
+          key: toolchain-${{ env.LLVM_MINGW }}
+
+      - name: Install llvm-mingw
+        run: bash deps/toolchain.sh
+
+      - name: Fetch Wine
+        run: |
+          set -euo pipefail
+          mkdir -p src
+          curl -sSL "https://codeload.github.com/ValveSoftware/wine/tar.gz/$WINE_COMMIT" |
+            tar -xz -C src
+          mv "src/wine-$WINE_COMMIT" src/wine
+          cd src/wine
+          for p in ../../deps/patches/wine/*.patch; do
+            patch -p1 --forward --batch < "$p"
+          done
+          test -z "$(find . -name '*.rej')" || { echo "patch rejects"; exit 1; }
+          grep -q 'linux-android\*)' configure.ac || { echo "preloader patch missing"; exit 1; }
+
+      - name: ccache
+        uses: actions/cache@v6
+        with:
+          path: ~/.ccache
+          key: wine-ccache-${{ env.WINE_COMMIT }}-${{ env.NDK_VERSION }}-${{ github.run_id }}
+          restore-keys: |
+            wine-ccache-${{ env.WINE_COMMIT }}-${{ env.NDK_VERSION }}-
+
+      - name: Build Wine
+        env:
+          WINE_SRC: ${{ github.workspace }}/src/wine
+          WINE_OUT: ${{ github.workspace }}/build/wine
+          LLVM_MINGW_ROOT: ${{ runner.temp }}/toolchain/llvm-mingw
+          CCACHE_DIR: /home/runner/.ccache
+          CCACHE_MAXSIZE: 1G
+          CCACHE_COMPILERCHECK: content
+        run: |
+          set -euo pipefail
+          export PATH="/usr/lib/ccache:$PATH"
+          bash deps/wine.sh
+          command -v ccache >/dev/null && ccache --show-stats
+          mkdir -p dist
+          tar -C build/wine/install -I 'zstd -T0 -6' -cf dist/wine-aarch64.tar.zst .
+          ls -l dist/
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wine-aarch64
+          path: dist/wine-aarch64.tar.zst
+          if-no-files-found: error
+          retention-days: 30
+
+  verify:
+    needs: [fex, wine]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: wine-aarch64
+          path: dist
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: fex-aarch64
+          path: dist
+
+      - name: Unpack
+        run: |
+          set -euo pipefail
+          mkdir -p root/wine root/fex
+          tar -C root/wine --zstd -xf dist/wine-aarch64.tar.zst
+          tar -C root/fex --zstd -xf dist/fex-aarch64.tar.zst
+          echo "ANDROID_NDK_HOME=/usr/local/lib/android/sdk/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+          echo "TOOLCHAIN_DIR=$RUNNER_TEMP/toolchain" >> "$GITHUB_ENV"
+
+      - uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/toolchain
+          key: toolchain-${{ env.LLVM_MINGW }}
+
+      - name: Static checks
+        run: |
+          set -euo pipefail
+          NDK=/usr/local/lib/android/sdk/ndk/$NDK_VERSION/toolchains/llvm/prebuilt/linux-x86_64/bin
+          MINGW=$RUNNER_TEMP/toolchain/llvm-mingw/bin
+
+          for f in bin/wineserver lib/wine/aarch64-unix/wine lib/wine/aarch64-unix/ntdll.so \
+                   lib/wine/aarch64-unix/win32u.so lib/wine/aarch64-windows/ntdll.dll \
+                   lib/wine/aarch64-windows/kernelbase.dll lib/wine/i386-windows/ntdll.dll \
+                   share/wine/wine.inf share/wine/nls/l_intl.nls; do
+            test -f "root/wine/$f" || { echo "wine: missing $f"; exit 1; }
+          done
+
+          for f in lib/wine/aarch64-windows/libarm64ecfex.dll \
+                   lib/wine/aarch64-windows/libwow64fex.dll \
+                   lib/wine/aarch64-unix/libarm64ecfex.so \
+                   lib/wine/aarch64-unix/libwow64fex.so; do
+            test -f "root/fex/$f" || { echo "fex: missing $f"; exit 1; }
+          done
+
+          test ! -e root/wine/lib/wine/aarch64-unix/wine-preloader
+
+          "$MINGW/llvm-objdump" -h root/wine/lib/wine/aarch64-windows/kernelbase.dll |
+            grep -q 'file format coff-arm64x'
+
+          machine() {
+            python3 -c 'import struct,sys; d=open(sys.argv[1],"rb").read(0x400); print(hex(struct.unpack_from("<H",d,struct.unpack_from("<I",d,0x3c)[0]+4)[0]))' "$1"
+          }
+          test "$(machine root/fex/lib/wine/aarch64-windows/libarm64ecfex.dll)" = 0xa641 ||
+            { echo "libarm64ecfex.dll is not ARM64EC"; exit 1; }
+          test "$(machine root/fex/lib/wine/aarch64-windows/libwow64fex.dll)" = 0x14c ||
+            { echo "libwow64fex.dll is not i386"; exit 1; }
+
+          for f in root/fex/lib/wine/aarch64-unix/*.so; do
+            if "$NDK/llvm-readelf" -dW "$f" | grep NEEDED |
+                 grep -qv -e '\[libc\.so\]' -e '\[libdl\.so\]' -e '\[libm\.so\]'; then
+              echo "$f: unexpected NEEDED"; exit 1
+            fi
+            "$NDK/llvm-readelf" -lW "$f" | awk '$1 == "LOAD" { print $NF }' |
+              grep -qv '^0x4000$' && { echo "$f: LOAD not 16 KB aligned"; exit 1; }
+          done
+
+          # i386 PE files are PE32; catching a 64-bit build here is cheaper
+          # than on the device.
+          test "$(machine root/wine/lib/wine/i386-windows/kernelbase.dll)" = 0x14c ||
+            { echo "i386 kernelbase.dll is not i386"; exit 1; }
+
+          cd dist
+          sha256sum wine-aarch64.tar.zst fex-aarch64.tar.zst > sha256.txt
+          cat sha256.txt
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: cpu-deps-sha256
+          path: dist/sha256.txt
+          if-no-files-found: error

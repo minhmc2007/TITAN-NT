@@ -1,0 +1,35 @@
+From 0d15b86a216f2fd2908cddcc2233b36170f4df0f Mon Sep 17 00:00:00 2001
+From: skywalker512 <houzhenhong@outlook.com>
+Date: Sun, 8 Nov 2026 04:36:03 +0800
+Subject: [PATCH] ntdll: Skip M_PERTURB where the C library lacks it (Bionic).
+
+Amphora-Origin: new (M1, 2026-11-07)
+Amphora-Upstream: Valve (the M_PERTURB use is Valve's)
+---
+ dlls/ntdll/unix/loader.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/dlls/ntdll/unix/loader.c b/dlls/ntdll/unix/loader.c
+index 2cc53c36bf5..bea18023faa 100644
+--- a/dlls/ntdll/unix/loader.c
++++ b/dlls/ntdll/unix/loader.c
+@@ -2421,7 +2421,9 @@ static void start_main_thread(void)
+     set_thread_teb( teb );
+ #endif
+ 
++#ifdef M_PERTURB  /* not in Bionic */
+     mallopt( M_PERTURB, 0xff );
++#endif
+     init_startup_info();
+     *(ULONG_PTR *)&peb->CloudFileFlags = get_image_address();
+     set_load_order_app_name( main_wargv[0] );
+@@ -2430,7 +2432,9 @@ static void start_main_thread(void)
+     load_ntdll();
+     load_wow64_ntdll( main_image_info.Machine );
+     load_apiset_dll();
++#ifdef M_PERTURB
+     mallopt( M_PERTURB, 0 );
++#endif
+     server_init_process_done();
+ }
+ 

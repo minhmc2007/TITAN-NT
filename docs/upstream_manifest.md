@@ -34,9 +34,39 @@ gh api repos/HansKristian-Work/vkd3d-proton/releases/latest --jq .tag_name
 - `FEXCore/HostFeatures.h` carries `SupportsRCPC` and `Source/Windows/ARM64EC/` exists, so
   the Cortex-A55 feature gate and the ARM64EC entry point named in `PLAN.md` are real
   surfaces, not assumptions.
-- Current Wine trees ship no Android display driver, so `winandroid.drv` is a from-scratch
-  driver rather than a port. Wine-on-Bionic stays the largest unproven assumption in the
-  plan; Milestone 2 proves it with a headless `cmd.exe` before any GPU work.
+- `proton-wine-11.0-2e` already carries `wineandroid.drv` and the `linux-android*` host
+  branch, and Wine's own PE ntdll implements the ARM64EC OS side (EC code bitmap, hybrid
+  dispatch, `MEM_EXTENDED_PARAMETER_EC_CODE`), so FEX's ARM64EC backend runs under Wine
+  without a Windows kernel. The remaining bionic delta is the patch stack in
+  `deps/patches/wine/`, rebased from the Amphora tree (see below).
+
+## CPU dependency build (`ci-deps-cpu.yml`)
+
+| Item | Version | Source |
+| --- | --- | --- |
+| Android NDK | `30.0.16248370` | preinstalled on `ubuntu-latest` |
+| llvm-mingw | `20260721` (ucrt, x86_64 host) | `mstorsjo/llvm-mingw` release asset |
+| Target triple | `aarch64-linux-android30` | Amphora's proven baseline |
+| PE archs | `arm64ec,aarch64,i386` (+ implied `x86_64`) | `--enable-archs` |
+
+`deps/patches/wine/` is the seven-commit bionic patch stack from
+`amphora-dev/proton-wine` branch `amphora/exp-11.0-20261027b` (commit `7b3ceaf8644b`),
+rebased onto `e60892cc`. All seven apply to `2e` with offsets only; provenance:
+
+| Patch | Amphora commit | Purpose |
+| --- | --- | --- |
+| `0001-configure-android-no-preloader` | `cc7a988069` | linker64 cannot load the static preloader |
+| `0002-ntdll-android-linker64-exec` | `d64ec180bf` | run app-private ELFs through `/system/bin/linker64` |
+| `0003-ntdll-android-execmod-anon-mremap` | `5220da919d` | SELinux denies `execmod` on relocated PE pages |
+| `0004-ntdll-android-protect-exec-sections` | `d41f6df033` | relocate without writing RO/exec pages |
+| `0005-fsync-android-no-shm` | `ca552f7c9c` | bionic has no `shm_open`; fsync stays off |
+| `0006-ntdll-android-no-m-perturb` | `0d15b86a21` | bionic has no `M_PERTURB` |
+| `0007-server-android-nls-from-argv0` | `ad85a24b20` | `/proc/self/exe` is linker64, not wineserver |
+
+`deps/patches/fex/` is `unixlib-android.patch` (no `librt`, `shm_open`/`shm_unlink`
+stubs) plus upstream `71444c94` (threads killed by `NtTerminateProcess` left FEX mutexes
+held), both from `amphora-engine`.
+
 
 ## Fork policy
 
