@@ -150,11 +150,13 @@ static NOINLINE unsigned long long int_indep_run(unsigned long long iters)
 /* --------------------------------------------------------------- floating */
 
 /* -ffp-contract=off keeps this a separate multiply and add on every target,
- * so the op count and the dependency latency match across architectures. */
+ * so the op count and the dependency latency match across architectures.
+ * The constants converge to 2.0 from 1.0; a fixed point equal to the seed
+ * would let SCCP fold the loop to a constant. */
 static NOINLINE unsigned long long fp_double_fma_run(unsigned long long iters)
 {
     double a = 1.0;
-    const double m = 0.9999999, c = 1e-7;
+    const double m = 0.9999999, c = 2e-7;
     unsigned long long i;
     for (i = 0; i < iters; i++) a = a * m + c;
     sink ^= f64_bits(a);
@@ -173,7 +175,7 @@ static NOINLINE unsigned long long fp_double_sqrt_run(unsigned long long iters)
 static NOINLINE unsigned long long fp_float_fma_run(unsigned long long iters)
 {
     float a = 1.0f;
-    const float m = 0.999999f, c = 1e-6f;
+    const float m = 0.999999f, c = 2e-6f;
     unsigned long long i;
     for (i = 0; i < iters; i++) a = a * m + c;
     sink ^= f32_bits(a);
@@ -594,13 +596,15 @@ struct mt_arg {
     HANDLE start;
     unsigned long long iters;
     unsigned long long ck;
+    int id;
 };
 
 static DWORD WINAPI mt_worker(void *p)
 {
     struct mt_arg *a = p;
     WaitForSingleObject(a->start, INFINITE);
-    a->ck = int_indep_body(a->iters);
+    /* Salt the checksum so identical workers do not XOR to zero. */
+    a->ck = int_indep_body(a->iters) ^ ((unsigned long long)(a->id + 1) << 40);
     return 0;
 }
 
@@ -622,6 +626,7 @@ static int mt_once(int threads, unsigned long long iters,
         args[i].start = start;
         args[i].iters = iters;
         args[i].ck = 0;
+        args[i].id = i;
         th[i] = CreateThread(NULL, 0, mt_worker, &args[i], 0, NULL);
         if (!th[i]) break;
         created++;
@@ -741,14 +746,19 @@ static void run_all(void)
         }
     }
     if (branch_data) {
-        struct result dep, les;
-        dep = measure("branch", "branch_dependent", branch_dependent_run, t);
-        les = measure("branch", "branch_branchless", branch_branchless_run, t);
-        /* Both variants must compute the same sum; a mismatch means the
-         * branchless rewrite is not measuring the same work. */
-        if (dep.ok && les.ok && dep.ck != les.ck) {
-            fail("branch_branchless", "mismatch");
+        /* Verify over one fixed pass: the two variants calibrate to different
+         * pass counts, so their measured checksums cover different work. */
+        unsigned long long dep_v = branch_dependent_run(1);
+        unsigned long long les_v = branch_branchless_run(1);
+        if (dep_v != les_v) {
+            if (selected("branch", "branch_dependent"))
+                fail("branch_dependent", "mismatch");
+            if (selected("branch", "branch_branchless"))
+                fail("branch_branchless", "mismatch");
         } else {
+            struct result dep, les;
+            dep = measure("branch", "branch_dependent", branch_dependent_run, t);
+            les = measure("branch", "branch_branchless", branch_branchless_run, t);
             if (dep.ok) {
                 double bytes = (double)dep.iters * BRANCH_N / (dep.med * 1e-9);
                 snprintf(extra, sizeof(extra), ",\"mb_per_s\":%.6g", bytes / 1e6);
@@ -808,9 +818,9 @@ static void run_all(void)
                           / (r.med * 1e-9);
                     snprintf(extra, sizeof(extra),
                              ",\"mb_per_s\":%.6g,\"size_bytes\":%llu,"
-                             "\"ns_per_copy\":%llu",
+                             "\"ns_per_copy\":%.2f",
                              bytes / 1e6, (unsigned long long)sizes[i].size,
-                             (unsigned long long)(r.med + 0.5));
+                             r.med / (double)r.iters);
                     emit(sizes[i].name, &r, (double)sizes[i].size, extra);
                 }
                 free(stream_src);

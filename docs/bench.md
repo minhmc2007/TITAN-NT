@@ -41,9 +41,11 @@ explicit throughput field where it helps.
 The branch pair is the point of the branch workload: the dependent variant
 keeps a real conditional branch and pays mispredictions; the branchless
 variant computes the identical sum with a sign mask
-(`mask = (b >> 7) - 1; sum += (b ^ mask) - mask`) and may vectorise. The binary
-compares both checksums and exits non-zero if they differ, so the branchless
-loop cannot silently measure different work.
+(`mask = (b >> 7) - 1; sum += (b ^ mask) - mask`) and may vectorise. Before
+timing, the binary runs one fixed pass of each variant and exits non-zero if
+the two checksums differ, so the branchless loop cannot silently measure
+different work. The timed checksums are not compared: the two variants
+calibrate to different pass counts.
 
 The branch loop carries an empty `asm volatile` in both arms. That is not
 decoration: it makes the arms non-speculatable, so LLVM cannot if-convert the
@@ -86,7 +88,9 @@ source before any timing starts.
 - **Memory.** `peak_rss_kb` is `PeakWorkingSetSize` from
   `GetProcessMemoryInfo`, a process-wide high-water mark, so it only grows
   across the suite. `private_kb` is the current `PrivateUsage` at the moment
-  the line is printed. Neither is a per-workload allocation counter.
+  the line is printed. Neither is a per-workload allocation counter. Wine's
+  `K32GetProcessMemoryInfo` on the Android bundle leaves `PrivateUsage` at 0;
+  the field is kept because a native Windows host fills it.
 - **Multithreading.** Thread creation and the start event are outside the
   timed window; the join is inside it, so a worker that starts late counts
   against wall time. Every thread runs the same calibrated iteration count at
@@ -136,7 +140,7 @@ One object per line. The first line is `{"bench":"start",...}`, the last is
 `{"bench":"summary",...}`; everything in between has `"bench":"cpu"`.
 
 ```json
-{"bench":"cpu","name":"int_alu_dependent","ns":344821000,"ops_per_s":1.1601e+09,"cpu":0.998,"peak_rss_kb":6144,"private_kb":4096,"min_ns":341002000,"max_ns":352119000,"iters":100000000,"repeats":5,"checksum":123456789}
+{"bench":"cpu","name":"int_alu_dependent","ns":344821000,"ops_per_s":1.1601e+09,"cpu":0.998,"peak_rss_kb":6144,"private_kb":0,"min_ns":341002000,"max_ns":352119000,"iters":100000000,"repeats":5,"checksum":123456789}
 ```
 
 Common fields:
