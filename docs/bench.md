@@ -41,7 +41,7 @@ explicit throughput field where it helps.
 The branch pair is the point of the branch workload: the dependent variant
 keeps a real conditional branch and pays mispredictions; the branchless
 variant computes the identical sum with a sign mask
-(`mask = -(b >> 7); sum += (b ^ mask) - mask`) and may vectorise. The binary
+(`mask = (b >> 7) - 1; sum += (b ^ mask) - mask`) and may vectorise. The binary
 compares both checksums and exits non-zero if they differ, so the branchless
 loop cannot silently measure different work.
 

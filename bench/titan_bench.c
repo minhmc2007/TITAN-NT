@@ -224,7 +224,7 @@ NOINLINE unsigned long long branch_branchless_run(unsigned long long passes)
     for (p = 0; p < passes; p++) {
         for (i = 0; i < BRANCH_N; i++) {
             unsigned b = branch_data[i];
-            uint32_t mask = 0u - (b >> 7);
+            uint32_t mask = (b >> 7) - 1u;
             sum += (b ^ mask) - mask;
         }
     }
