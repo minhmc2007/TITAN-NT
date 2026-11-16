@@ -220,10 +220,15 @@ jobs:
           machine() {
             python3 -c 'import struct,sys; d=open(sys.argv[1],"rb").read(0x400); print(hex(struct.unpack_from("<H",d,struct.unpack_from("<I",d,0x3c)[0]+4)[0]))' "$1"
           }
-          test "$(machine root/fex/lib/wine/aarch64-windows/libarm64ecfex.dll)" = 0xa641 ||
-            { echo "libarm64ecfex.dll is not ARM64EC"; exit 1; }
-          test "$(machine root/fex/lib/wine/aarch64-windows/libwow64fex.dll)" = 0x14c ||
-            { echo "libwow64fex.dll is not i386"; exit 1; }
+          # ARM64EC images carry machine AMD64 (Wine's is_arm64ec() checks
+          # exactly that); the EC/native split lives in the CHPE bitmap.
+          test "$(machine root/fex/lib/wine/aarch64-windows/libarm64ecfex.dll)" = 0x8664 ||
+            { echo "libarm64ecfex.dll is not an ARM64EC image"; exit 1; }
+          test "$(machine root/fex/lib/wine/aarch64-windows/libwow64fex.dll)" = 0xaa64 ||
+            { echo "libwow64fex.dll is not ARM64"; exit 1; }
+          for f in root/fex/lib/wine/aarch64-windows/*.dll; do
+            grep -qa 'Wine builtin DLL' "$f" || { echo "$f is not marked builtin"; exit 1; }
+          done
 
           for f in root/fex/lib/wine/aarch64-unix/*.so; do
             if "$NDK/llvm-readelf" -dW "$f" | grep NEEDED |
