@@ -63,6 +63,9 @@ rm -rf autom4te.cache
 # generated from the sources and must not be trusted from the tarball.
 tools/make_requests
 tools/make_specfiles
+# include/Makefile.in lists wine/vulkan.h and win32u includes it even with
+# --without-vulkan, so the header is generated regardless of driver set.
+( cd dlls/winevulkan && ./make_vulkan -x vk.xml -X video.xml )
 
 rm -rf "$TOOLS" "$BUILD"
 mkdir -p "$TOOLS" "$BUILD"
