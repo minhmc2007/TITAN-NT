@@ -1,0 +1,173 @@
+name: ci-bench
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - bench/**
+      - .github/workflows/ci-bench.yml
+  workflow_dispatch:
+
+concurrency:
+  group: ci-bench-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  LLVM_MINGW: "20260721"
+  NDK_VERSION: 30.0.16248370
+  LZ4_VERSION: v1.10.0
+  LZ4_SHA256: 537512904744b35e232912055ccf8ec66d768639ff3abe5788d90d792ec5f48b
+  ZSTD_VERSION: v1.5.7
+  ZSTD_SHA256: 37d7284556b20954e56e1ca85b80226768902e2edabd3b649e9e72c0c9012ee3
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Toolchain env
+        run: |
+          set -euo pipefail
+          echo "ANDROID_NDK_HOME=/usr/local/lib/android/sdk/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+          echo "TOOLCHAIN_DIR=$RUNNER_TEMP/toolchain" >> "$GITHUB_ENV"
+
+      - uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/toolchain
+          key: toolchain-${{ env.LLVM_MINGW }}
+
+      - name: Install llvm-mingw
+        run: bash deps/toolchain.sh
+
+      - name: Fetch LZ4 and Zstd
+        run: |
+          set -euo pipefail
+          mkdir -p external
+          curl -sSL -o /tmp/lz4.tar.gz \
+            "https://github.com/lz4/lz4/archive/refs/tags/$LZ4_VERSION.tar.gz"
+          echo "$LZ4_SHA256  /tmp/lz4.tar.gz" | sha256sum -c -
+          tar -C external -xzf /tmp/lz4.tar.gz
+          mv "external/lz4-${LZ4_VERSION#v}" external/lz4
+          curl -sSL -o /tmp/zstd.tar.gz \
+            "https://github.com/facebook/zstd/archive/refs/tags/$ZSTD_VERSION.tar.gz"
+          echo "$ZSTD_SHA256  /tmp/zstd.tar.gz" | sha256sum -c -
+          tar -C external -xzf /tmp/zstd.tar.gz
+          mv "external/zstd-${ZSTD_VERSION#v}" external/zstd
+
+      - name: Build PE benchmarks
+        run: |
+          set -euo pipefail
+          MINGW="$TOOLCHAIN_DIR/llvm-mingw/bin"
+          ZSRC=external/zstd/lib
+          zflags=(-O2 -DNDEBUG -DXXH_NAMESPACE=ZSTD_ -DZSTD_DISABLE_ASM
+                  -DZSTD_LEGACY_SUPPORT=0 -I"$ZSRC")
+          mkdir -p out
+          for arch in x86_64 i686 aarch64; do
+            cc="$MINGW/$arch-w64-mingw32-clang"
+            zobj="build/zstd-$arch"
+            mkdir -p "$zobj"
+            for f in "$ZSRC"/common/*.c "$ZSRC"/compress/*.c "$ZSRC"/decompress/*.c; do
+              "$cc" "${zflags[@]}" -c "$f" -o "$zobj/$(basename "${f%.c}").o"
+            done
+            "$cc" -O2 -c -Iexternal/lz4/lib external/lz4/lib/lz4.c \
+              -o "build/lz4-$arch.o"
+            "$cc" -O2 -std=c11 -Wall -Wextra -ffp-contract=off -fno-math-errno \
+              -Iexternal/lz4/lib -Iexternal/zstd/lib \
+              -o "out/titan_bench_$arch.exe" bench/titan_bench.c \
+              "build/lz4-$arch.o" "$zobj"/*.o
+          done
+
+      - name: Check PE machine types
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import struct
+          want = {"x86_64": 0x8664, "i686": 0x14c, "aarch64": 0xaa64}
+          for arch, machine in want.items():
+              path = f"out/titan_bench_{arch}.exe"
+              head = open(path, "rb").read(0x400)
+              off = struct.unpack_from("<I", head, 0x3c)[0]
+              got = struct.unpack_from("<H", head, off + 4)[0]
+              print(path, hex(got))
+              assert got == machine, (path, hex(got), hex(machine))
+          PY
+
+      - name: Package artifact
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp bench/run.sh out/run.sh
+          chmod +x out/run.sh
+          tar -C out -czf dist/titan-bench.tar.gz \
+            titan_bench_x86_64.exe titan_bench_i686.exe \
+            titan_bench_aarch64.exe run.sh
+          tar -tzf dist/titan-bench.tar.gz
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: titan-bench
+          path: dist/titan-bench.tar.gz
+          if-no-files-found: error
+          retention-days: 30
+
+  smoke:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: titan-bench
+          path: dist
+
+      - name: Extract
+        run: |
+          set -euo pipefail
+          mkdir -p pkg
+          tar -C pkg -xzf dist/titan-bench.tar.gz
+          ls -l pkg
+
+      - name: Install host wine
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends wine64
+          if command -v wine64 >/dev/null 2>&1; then wine64 --version; else wine --version; fi
+
+      - name: Run x86_64 build
+        run: |
+          set -euo pipefail
+          export WINEPREFIX="$RUNNER_TEMP/wineprefix"
+          export WINEDEBUG=-all
+          export WINEDLLOVERRIDES="mscoree,mshtml="
+          if command -v wine64 >/dev/null 2>&1; then W=wine64; else W=wine; fi
+          EXE="$(pwd)/pkg/titan_bench_x86_64.exe"
+          "$W" "$EXE" --all --seconds 0.05 --repeats 1 > smoke.jsonl
+          python3 - <<'PY'
+          import json
+          rows = [json.loads(l) for l in open("smoke.jsonl") if l.strip()]
+          assert rows and rows[0]["bench"] == "start", rows[:1]
+          assert rows[-1]["bench"] == "summary", rows[-1]
+          assert rows[-1]["failures"] == 0, rows[-1]
+          names = {r["name"] for r in rows
+                   if r.get("bench") == "cpu" and "name" in r}
+          required = {
+              "int_alu_dependent", "int_alu_independent",
+              "fp_double_fma", "fp_double_sqrt",
+              "fp_float_fma", "fp_float_sqrt",
+              "branch_dependent", "branch_branchless", "mem_chase",
+              "mem_stream_4k", "mem_stream_64k", "mem_stream_1m",
+              "mem_stream_8m", "mem_stream_32m",
+              "int_mt_1t", "int_mt_2t", "int_mt_4t", "int_mt_8t",
+              "lz4_compress", "lz4_decompress",
+              "zstd_compress", "zstd_decompress",
+          }
+          missing = required - names
+          assert not missing, missing
+          print(f"{len(rows)} rows, {len(names)} measurements")
+          PY
