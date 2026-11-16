@@ -1,0 +1,39 @@
+From: TITAN-NT <titan@localhost>
+Subject: [PATCH] ntdll: Use the arm64 userfaultfd number, skip it on Android.
+
+uffd_tmp_defs.h defines __NR_userfaultfd as 374 for every non-x86_64
+architecture. aarch64 uses 282, so Wine probed a nonexistent syscall, and the
+Android app seccomp filter answers that with SIGSYS: the loader died in
+virtual_init before any Windows code ran.
+
+Android also denies userfaultfd to app processes outright
+(vm.unprivileged_userfaultfd=0 plus SELinux), so skip the kernel write-watch
+path there and use the mprotect one.
+---
+diff --git a/dlls/ntdll/unix/uffd_tmp_defs.h b/dlls/ntdll/unix/uffd_tmp_defs.h
+--- a/dlls/ntdll/unix/uffd_tmp_defs.h
++++ b/dlls/ntdll/unix/uffd_tmp_defs.h
+@@ -5,6 +5,8 @@
+ 
+ #ifdef __x86_64__
+ #define __NR_userfaultfd 323
++#elif defined(__aarch64__)
++#define __NR_userfaultfd 282
+ #else
+ #define __NR_userfaultfd 374
+ #endif
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -79,7 +79,10 @@
+ #undef host_page_size
+ #endif
+ 
+-#if defined(HAVE_LINUX_USERFAULTFD_H) && defined(HAVE_LINUX_FS_H)
++/* Android denies userfaultfd to app processes (vm.unprivileged_userfaultfd=0
++ * and SELinux), and the app seccomp filter traps the syscall, so the mprotect
++ * write-watch path is the only usable one. */
++#if defined(HAVE_LINUX_USERFAULTFD_H) && defined(HAVE_LINUX_FS_H) && !defined(__ANDROID__)
+ # include <linux/userfaultfd.h>
+ # include <linux/fs.h>
+ #include "uffd_tmp_defs.h"
