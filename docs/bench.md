@@ -168,7 +168,7 @@ The device header is a plain JSON object (no `#` comments) so the whole file
 stays parseable:
 
 ```json
-{"bench":"device","uname":"Linux localhost 6.1.75 ... aarch64 Toybox","model":"SM-A556E","platform":"s5e8845","cpu_max_freq_khz":[2000000,2000000,2000000,2000000,2750000,2750000,2750000,2750000]}
+{"bench":"device","uname":"Linux localhost 6.1.162-android14-11 ... aarch64 Android","model":"SM-A556E","platform":"erd8845","cpu_max_freq_khz":[2050000,2050000,2050000,2050000,2750000,2750000,2750000,2750000]}
 ```
 
 Example queries with `jq` (optional; the format is plain JSONL):
@@ -180,10 +180,11 @@ jq -r 'select(.name=="int_mt_8t") | .scaling' bench-results.jsonl
 
 ## Baseline, Galaxy A55
 
-One run on the A55 (`SM-A556E`, `s5e8845`), bundle from the `m2-bundle`
-prerelease, fresh prefix, `FEX_DISKCACHE=1`, no CPU pinning, device not
-thermally controlled. Medians of the default repeats. Percentages are relative
-to the native `aarch64` column.
+One run on the A55 (`SM-A556E`, platform string `erd8845`), bundle from the
+`m2-bundle` prerelease, fresh prefix, `FEX_DISKCACHE=1`, no CPU pinning, device
+not thermally controlled. Medians of the default repeats. Percentages are
+relative to the native `aarch64` column. Raw output:
+`bench/results/a55-2026-11-16/bench-results.jsonl`.
 
 | Workload | `aarch64` | `x86_64` | % | `i686` | % |
 | --- | --- | --- | --- | --- | --- |
