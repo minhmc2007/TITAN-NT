@@ -72,7 +72,8 @@ mkdir -p "$TOOLS" "$BUILD"
   cd "$TOOLS"
   "$(realpath --relative-to="$TOOLS" "$WINE_SRC")/configure" --enable-win64 \
     --without-x --without-gstreamer --without-vulkan --without-wayland \
-    --without-pulse --without-alsa --without-sdl --disable-tests
+    --without-pulse --without-alsa --without-sdl --without-freetype \
+    --without-fontconfig --disable-tests
   make -j"$JOBS" __tooldeps__ nls/all
 )
 
