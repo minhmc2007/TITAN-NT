@@ -216,6 +216,7 @@ static inline long titan_sched_setaffinity(long pid, size_t len,
                         (long)(uintptr_t)mask, 0, 0, 0);
 }
 
+/* Returns the copied byte count, not 0, on arm64. */
 static inline long titan_sched_getaffinity(long pid, size_t len, void *mask) {
   return titan_syscall6(TITAN_SYS_sched_getaffinity, pid, (long)len,
                         (long)(uintptr_t)mask, 0, 0, 0);

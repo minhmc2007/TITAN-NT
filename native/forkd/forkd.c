@@ -190,7 +190,7 @@ static void probe_affinity(void) {
   long rg = titan_sched_getaffinity(0, sizeof(orig), &orig);
   long rp = 0, re = 0;
   uint64_t mp = 0, me = 0;
-  if (rg == 0) {
+  if (rg >= 0) {
     rp = titan_pin_cluster(1);
     if (rp == 0)
       titan_sched_getaffinity(0, sizeof(mp), &mp);
