@@ -131,7 +131,10 @@ static int mutex_basic(void)
     if (!m) return 0;
     a = WaitForSingleObject(m, 1000);
     b = WaitForSingleObject(m, 0);
-    ok = a == WAIT_OBJECT_0 && b == WAIT_TIMEOUT;
+    /* A mutex is recursive: the owning thread re-acquires it and the recursion
+     * count rises, so both waits succeed and both need a release. */
+    ok = a == WAIT_OBJECT_0 && b == WAIT_OBJECT_0;
+    ReleaseMutex(m);
     ReleaseMutex(m);
     CloseHandle(m);
     return ok;
