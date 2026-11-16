@@ -147,7 +147,13 @@ jobs:
           export WINEDLLOVERRIDES="mscoree,mshtml="
           if command -v wine64 >/dev/null 2>&1; then W=wine64; else W=wine; fi
           EXE="$(pwd)/pkg/titan_bench_x86_64.exe"
-          "$W" "$EXE" --all --seconds 0.05 --repeats 1 > smoke.jsonl
+          if "$W" "$EXE" --all --seconds 0.05 --repeats 1 > smoke.jsonl; then
+            cat smoke.jsonl
+          else
+            st=$?
+            cat smoke.jsonl
+            exit "$st"
+          fi
           python3 - <<'PY'
           import json
           rows = [json.loads(l) for l in open("smoke.jsonl") if l.strip()]
