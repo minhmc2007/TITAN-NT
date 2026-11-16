@@ -17,6 +17,7 @@ permissions:
 
 env:
   LLVM_MINGW: "20260721"
+  NDK_VERSION: 30.0.16248370
 
 jobs:
   bundle:
@@ -56,6 +57,15 @@ jobs:
           done
           test "$(python3 -c 'import struct; d=open("out/tests/m2_win_test32.exe","rb").read(0x400); o=struct.unpack_from("<I",d,0x3c)[0]; print(hex(struct.unpack_from("<H",d,o+4)[0]))')" = 0x14c
 
+      - name: Build SIGSYS probe
+        run: |
+          set -euo pipefail
+          NDK=/usr/local/lib/android/sdk/ndk/$NDK_VERSION/toolchains/llvm/prebuilt/linux-x86_64/bin
+          mkdir -p out/probe
+          "$NDK/aarch64-linux-android34-clang" -shared -fPIC -O2 -Wall -Wextra \
+            -o out/probe/libsigprobe.so native/diag/sigsys_trap.c
+          "$NDK/llvm-readelf" -dW out/probe/libsigprobe.so | grep NEEDED
+
       - name: Assemble device bundle
         run: |
           set -euo pipefail
@@ -66,6 +76,7 @@ jobs:
           cp -a fex/lib/wine/aarch64-windows/. out/root/lib/wine/aarch64-windows/
           cp -a fex/lib/wine/aarch64-unix/. out/root/lib/wine/aarch64-unix/
           cp -a out/tests out/root/tests
+          cp out/probe/libsigprobe.so out/root/libsigprobe.so
           cp tests/win/run.sh out/root/run.sh
           chmod +x out/root/run.sh
           tar -C out/root -czf dist/titan-m2-wine.tar.gz .

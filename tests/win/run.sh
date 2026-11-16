@@ -8,6 +8,7 @@ export WINEPREFIX="${WINEPREFIX:-$HERE/prefix}"
 export WINEDEBUG="${WINEDEBUG:--all}"
 export WINELOADER="$HERE/lib/wine/aarch64-unix/wine"
 export PATH="$HERE/bin:$PATH"
+if [ "${TITAN_SIGSYS:-0}" = 1 ]; then export LD_PRELOAD="$HERE/libsigprobe.so"; fi
 
 wine() { /system/bin/linker64 "$WINELOADER" "$@"; }
 wineserver() { /system/bin/linker64 "$HERE/bin/wineserver" "$@"; }
