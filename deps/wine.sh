@@ -27,6 +27,8 @@ configure_flags=(
   --disable-win16
   # amd_ags_x64 needs libdrm, which is not in the NDK sysroot.
   --disable-amd_ags_x64
+  # M2 is headless; the Android display driver needs the M3 ABI patches.
+  --disable-wineandroid_drv
   --without-alsa --without-capi --without-coreaudio --without-cups --without-dbus
   --without-ffmpeg --without-fontconfig --without-freetype
   --without-gettext --with-gettextpo=no
