@@ -1,0 +1,79 @@
+name: ci-m2-win
+
+on:
+  workflow_dispatch:
+    inputs:
+      deps_run_id:
+        description: ci-deps-cpu run id that produced the Wine and FEX artifacts
+        required: true
+
+concurrency:
+  group: ci-m2-win-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  LLVM_MINGW: "20260721"
+
+jobs:
+  bundle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download CPU deps
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEPS_RUN_ID: ${{ inputs.deps_run_id }}
+        run: |
+          set -euo pipefail
+          gh run download "$DEPS_RUN_ID" -n wine-aarch64 -D dist -R "$GITHUB_REPOSITORY"
+          gh run download "$DEPS_RUN_ID" -n fex-aarch64 -D dist -R "$GITHUB_REPOSITORY"
+          ls -l dist/
+
+      - name: Install llvm-mingw
+        run: |
+          set -euo pipefail
+          asset="llvm-mingw-$LLVM_MINGW-ucrt-ubuntu-22.04-x86_64"
+          curl -sSL -o /tmp/mingw.tar.xz \
+            "https://github.com/mstorsjo/llvm-mingw/releases/download/$LLVM_MINGW/$asset.tar.xz"
+          tar -C "$RUNNER_TEMP" -xf /tmp/mingw.tar.xz
+          mv "$RUNNER_TEMP/$asset" "$RUNNER_TEMP/llvm-mingw"
+          echo "MINGW=$RUNNER_TEMP/llvm-mingw/bin" >> "$GITHUB_ENV"
+
+      - name: Build Win64 and Win32 tests
+        run: |
+          set -euo pipefail
+          mkdir -p out/tests
+          "$MINGW/x86_64-w64-mingw32-clang" -O2 -Wall -Wextra -o out/tests/m2_win_test64.exe tests/win/m2_win_test.c
+          "$MINGW/i686-w64-mingw32-clang" -O2 -Wall -Wextra -o out/tests/m2_win_test32.exe tests/win/m2_win_test.c
+          for f in out/tests/*.exe; do
+            python3 -c 'import struct,sys; d=open(sys.argv[1],"rb").read(0x400); o=struct.unpack_from("<I",d,0x3c)[0]; print(sys.argv[1], hex(struct.unpack_from("<H",d,o+4)[0]))' "$f"
+          done
+          test "$(python3 -c 'import struct; d=open("out/tests/m2_win_test32.exe","rb").read(0x400); o=struct.unpack_from("<I",d,0x3c)[0]; print(hex(struct.unpack_from("<H",d,o+4)[0]))')" = 0x14c
+
+      - name: Assemble device bundle
+        run: |
+          set -euo pipefail
+          mkdir -p out/root
+          tar -C out/root --zstd -xf dist/wine-aarch64.tar.zst
+          mkdir -p fex
+          tar -C fex --zstd -xf dist/fex-aarch64.tar.zst
+          cp -a fex/lib/wine/aarch64-windows/. out/root/lib/wine/aarch64-windows/
+          cp -a fex/lib/wine/aarch64-unix/. out/root/lib/wine/aarch64-unix/
+          cp -a out/tests out/root/tests
+          cp tests/win/run.sh out/root/run.sh
+          chmod +x out/root/run.sh
+          tar -C out/root -I 'zstd -T0 -6' -cf dist/titan-m2-wine.tar.zst .
+          ls -l dist/
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: titan-m2-wine
+          path: dist/titan-m2-wine.tar.zst
+          if-no-files-found: error
+          retention-days: 30
