@@ -23,7 +23,7 @@ grep -q '^RESULT probe.exit=0$' "$LOG" || fail=1
 grep -q '^RESULT probe.dlopen=ok$' "$LOG" || fail=1
 grep -q '^RESULT probe.instance=ok$' "$LOG" || fail=1
 grep -q '^RESULT x18_clobbers=0$' "$LOG" || fail=1
-grep -q '^RESULT device.0.name=' "$LOG" || fail=1
+grep -q '^RESULT device.0.name=.' "$LOG" || fail=1
 grep -q '^RESULT drm.readable=1$' "$LOG" || fail=1
 
 if [ "$fail" -ne 0 ]; then
