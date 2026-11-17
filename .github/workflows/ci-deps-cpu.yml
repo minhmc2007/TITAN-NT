@@ -199,11 +199,22 @@ jobs:
           MINGW=$RUNNER_TEMP/toolchain/llvm-mingw/bin
 
           for f in bin/wineserver lib/wine/aarch64-unix/wine lib/wine/aarch64-unix/ntdll.so \
-                   lib/wine/aarch64-unix/win32u.so lib/wine/aarch64-windows/ntdll.dll \
+                   lib/wine/aarch64-unix/win32u.so lib/wine/aarch64-unix/wineandroid.so \
+                   lib/wine/aarch64-unix/winevulkan.so lib/wine/aarch64-windows/wineandroid.drv \
+                   lib/wine/aarch64-windows/winevulkan.dll lib/wine/aarch64-windows/vulkan-1.dll \
+                   lib/wine/aarch64-windows/ntdll.dll \
                    lib/wine/aarch64-windows/kernelbase.dll lib/wine/i386-windows/ntdll.dll \
                    share/wine/wine.inf share/wine/nls/l_intl.nls; do
             test -f "root/wine/$f" || { echo "wine: missing $f"; exit 1; }
           done
+
+          # DXVK loads vulkan-1.dll, which forwards to winevulkan.dll and
+          # winevulkan.so. The unix lib must dlopen the host loader so
+          # TITAN_VULKAN_LIB can select the shim.
+          if "$NDK/llvm-readelf" -dW root/wine/lib/wine/aarch64-unix/winevulkan.so |
+               grep NEEDED | grep -c libvulkan > /dev/null; then
+            echo "winevulkan.so is linked to libvulkan"; exit 1
+          fi
 
           for f in lib/wine/aarch64-windows/libarm64ecfex.dll \
                    lib/wine/aarch64-windows/libwow64fex.dll \
