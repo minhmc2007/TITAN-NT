@@ -46,6 +46,11 @@ test -f "$STAGE/dxgi.dll"
 test -f "$STAGE/d3d10core.dll"
 test -f "$STAGE/d3d9.dll"
 
+# meson strips only on install; these DLLs are copied from the build tree.
+for dll in "$STAGE"/*.dll; do
+  "$BIN/arm64ec-w64-mingw32-strip" --strip-all "$dll"
+done
+
 for dll in "$STAGE"/*.dll; do
   "$BIN/llvm-readobj" --file-headers "$dll" |
     grep -Eq 'Machine: (IMAGE_FILE_MACHINE_ARM64EC|IMAGE_FILE_MACHINE_ARM64X)' || {

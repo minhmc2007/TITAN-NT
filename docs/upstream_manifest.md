@@ -76,7 +76,8 @@ held), both from `amphora-engine`.
 | Item | Version | Source |
 | --- | --- | --- |
 | Android NDK | `30.0.16248370` | preinstalled on `ubuntu-latest` |
-| llvm-mingw | `20260721` (ucrt, x86_64 host) | `mstorsjo/llvm-mingw` release asset |
+| llvm-mingw (DXVK) | `20260721` (ucrt, x86_64 host) | `mstorsjo/llvm-mingw` release asset |
+| llvm-mingw (vkd3d) | `20260908` (ucrt, x86_64 host) | `mstorsjo/llvm-mingw` release asset |
 | RADV target | `aarch64-linux-android34` | `radv-xclipse` `build.sh` recipe |
 | DXVK target | `arm64ec-w64-mingw32` | llvm-mingw clang wrappers |
 | vkd3d target | `arm64ec-w64-mingw32` with `-marm64x` | llvm-mingw clang wrappers |
@@ -86,8 +87,11 @@ held), both from `amphora-engine`.
 `-march=armv8.2-a -ffixed-x18 -fno-sanitize=shadow-call-stack`. The published
 `v1.9.0` binary does use x18 (a context-restore stub at `0x10c4390` reads
 `ldp x18, x19, [x0, #0x90]`), so the CI job disassembles both the unstripped and
-stripped driver and fails if any `x18`/`w18` operand remains. The archive uses the
-release `meta.json` contract (`schemaVersion: 1`, `libraryName: "vulkan.radeon.so"`)
+stripped driver and fails if any `x18`/`w18` operand remains. The NDK's
+`libunwind.a` saves and restores x18 in `UnwindRegistersSave.S.o` and
+`UnwindRegistersRestore.S.o`; the job rewrites those two instructions in the
+archive clang actually links before building. The archive uses the release
+`meta.json` contract (`schemaVersion: 1`, `libraryName: "vulkan.radeon.so"`)
 and the job fails on any NEEDED entry outside
 `libhardware.so liblog.so libnativewindow.so libsync.so libm.so libdl.so libc.so`.
 
@@ -101,15 +105,21 @@ other hunks in that patch are not needed here: v3.1.1 already guards
 `__arm64ec__` in `util_bit.h`, `util_hotpatch.h` and `d3d9_device.cpp`, keeps
 `D3DDEVINFO_RESOURCEMANAGER` inside `namespace dxvk`, includes `<algorithm>` in
 `src/util/config/config.cpp`, and no longer has `replaceNaN` or
-`d3d10_interfaces.h`.
+`d3d10_interfaces.h`. The job runs `arm64ec-w64-mingw32-strip --strip-all` on the
+staged DLLs because meson's `--strip` applies at install time and the DLLs are
+copied from the build tree.
 
 vkd3d-proton `v3.1` ships `build-arm64x.txt` but names
 `arm64ec-w64-mingw32-gcc`/`g++`, and `meson.build` passes `-msse`/`-msse2`
 unconditionally. `deps/patches/vkd3d/0001-arm64ec.patch` switches the machine file
 to the llvm-mingw clang wrappers, keeps `-marm64x`, and gates the SSE flags to x86.
-The `widl` requirement is met by llvm-mingw's
-`arm64ec-w64-mingw32-widl` through `widl-mingw-tools-fallback`; no Wine build is
-needed in the job.
+llvm-mingw `20260908` has no `arm64ec-w64-mingw32` sysroot; its hybrid ARM64X
+libraries live under `aarch64-w64-mingw32`. The job shadows the cross file's
+`arm64ec-w64-mingw32-clang`/`clang++` names with wrappers that exec the `aarch64`
+compilers and drop `-marm64x` for preprocess-only runs (`-E`, `-M`, `-MM`, `-S`,
+`-fsyntax-only`), where clang rejects it as unused. The `widl` requirement is met
+by llvm-mingw's `arm64ec-w64-mingw32-widl` through `widl-mingw-tools-fallback`; no
+Wine build is needed in the job.
 
 All three jobs publish workflow artifacts only (`retention-days: 30`); nothing is
 attached to a GitHub Release.

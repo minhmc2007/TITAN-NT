@@ -161,6 +161,9 @@ jobs:
   vkd3d:
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    env:
+      # Hybrid ARM64X libraries landed after 20260721.
+      LLVM_MINGW: "20260908"
     steps:
       - uses: actions/checkout@v7
 

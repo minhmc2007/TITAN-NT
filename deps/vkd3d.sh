@@ -11,9 +11,35 @@ BIN="$MINGW/bin"
 BUILD="$OUT/build"
 DIST="$OUT/dist"
 STAGE="$OUT/stage"
+TOOLS="$OUT/bin"
 
-mkdir -p "$BUILD" "$DIST"
-export PATH="$BIN:$PATH"
+mkdir -p "$BUILD" "$DIST" "$TOOLS"
+
+# 20260908 ships hybrid ARM64X libraries under the aarch64 prefix only; shadow
+# the arm64ec compiler names so the cross file keeps its upstream spelling.
+for tool in clang clang++; do
+  cat > "$TOOLS/arm64ec-w64-mingw32-$tool" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+real='$BIN/aarch64-w64-mingw32-$tool'
+preprocess=0
+for arg in "\$@"; do
+  case "\$arg" in
+    -E|-M|-MM|-S|-fsyntax-only) preprocess=1 ;;
+  esac
+done
+args=()
+for arg in "\$@"; do
+  if [ "\$preprocess" = 1 ] && [ "\$arg" = -marm64x ]; then
+    continue
+  fi
+  args+=("\$arg")
+done
+exec "\$real" "\${args[@]}"
+EOF
+  chmod +x "$TOOLS/arm64ec-w64-mingw32-$tool"
+done
+export PATH="$TOOLS:$BIN:$PATH"
 
 meson setup "$BUILD" "$SRC" --cross-file "$SRC/build-arm64x.txt" \
   --buildtype=release --strip
@@ -25,6 +51,11 @@ mkdir -p "$STAGE"
 cp "$BUILD/libs/d3d12/d3d12.dll" "$STAGE/d3d12.dll"
 cp "$BUILD/libs/d3d12core/d3d12core.dll" "$STAGE/d3d12core.dll"
 cp "$SRC/COPYING" "$STAGE/COPYING"
+
+# meson strips only on install; these DLLs are copied from the build tree.
+for dll in "$STAGE/d3d12.dll" "$STAGE/d3d12core.dll"; do
+  "$BIN/arm64ec-w64-mingw32-strip" --strip-all "$dll"
+done
 
 for dll in "$STAGE/d3d12.dll" "$STAGE/d3d12core.dll"; do
   "$BIN/llvm-readobj" --file-headers "$dll" |
