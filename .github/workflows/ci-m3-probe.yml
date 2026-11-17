@@ -1,6 +1,9 @@
 name: ci-m3-probe
 
 on:
+  push:
+    branches:
+      - m3/vk-probe
   workflow_dispatch:
     inputs:
       gpu_run_id:
@@ -78,8 +81,14 @@ jobs:
           fi
           state=$(gh run view "$id" --json status,conclusion --jq '"\(.status)/\(.conclusion)"')
           if [ "$state" != "completed/success" ]; then
-            echo "::error::ci-deps-gpu run $id is $state, not completed/success"
-            exit 1
+            # Only radv matters here; a failed sibling job still ships its artifact.
+            radv=$(gh run view "$id" --json jobs \
+              --jq '.jobs[] | select(.name == "radv") | "\(.status)/\(.conclusion)"')
+            if [ "$radv" != "completed/success" ]; then
+              echo "::error::ci-deps-gpu run $id is $state and its radv job is ${radv:-absent}"
+              exit 1
+            fi
+            echo "run $id is $state but its radv job succeeded"
           fi
           sha=$(gh run view "$id" --json headSha --jq .headSha)
           echo "id=$id" >> "$GITHUB_OUTPUT"
