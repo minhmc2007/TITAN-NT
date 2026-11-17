@@ -68,6 +68,10 @@ provenance:
 | `0009-wineandroid-no-gradle-apk` | TITAN | the cross build has no Android SDK/Gradle; the Java host APK belongs to `ci-m3-apk` |
 | `0010-wineandroid-driver-api-port` | TITAN | upstream's win32u drawable refactor left the unbuilt driver with a stale prototype and surface-create signature |
 | `0011-wineandroid-start-device-callback` | TITAN | the unixlib init params carry the start-device callback as a client pointer, not a function pointer |
+| `0012-winevulkan-android-surface` | TITAN | the Android driver needs `vkCreateAndroidSurfaceKHR`, which `make_vulkan` drops with the other platform extensions |
+| `0013-wineandroid-vulkan-surface` | TITAN | create the host Android surface from the registered client `ANativeWindow` |
+| `0014-wineandroid-native-window-ops` | TITAN | forward the dataspace/usage/refresh/timeout perform calls the loader's WSI makes |
+| `0015-win32u-titan-vulkan-lib` | TITAN | `TITAN_VULKAN_LIB` selects a custom-driver loader instead of the AOSP SONAME |
 
 `dlls/wineandroid.drv` is compiled in the `ci-deps-cpu` wine job since Milestone 3. It is
 not a default display driver: `programs/explorer/desktop.c` keeps `mac,x11,wayland` as its
@@ -75,6 +79,28 @@ default list, so `wineboot -i` and console tests stay on the null driver unless 
 started with `/desktop=...,android` (which the Java host does). Wine's Vulkan stack
 (`winevulkan.dll`/`winevulkan.so` plus the `vulkan-1.dll` loader) is built in the same job;
 `win32u.so` dlopens the host loader rather than linking it.
+
+The Android driver wraps the registered client window in an `ANativeWindow` and calls the
+host loader's `vkCreateAndroidSurfaceKHR`; `map_instance_extensions` exposes
+`VK_KHR_android_surface` to the client as `VK_KHR_win32_surface` and clears the host flag
+before building the host enable list, so applications keep using Win32 surfaces. If the
+loader does not advertise `VK_KHR_android_surface`, the driver logs an ERR, drops the client
+Win32 surface extension and returns `VK_ERROR_EXTENSION_NOT_PRESENT`; Wine does not fake
+Android WSI itself. The loader must also accept the perform calls the WSI makes
+(`SET_BUFFERS_DATASPACE`, `SET_SHARED_BUFFER_MODE`, `SET_AUTO_REFRESH`,
+`GET_REFRESH_CYCLE_DURATION`, `SET_USAGE64`, `GET_CONSUMER_USAGE64`,
+`SET_DEQUEUE_TIMEOUT`); the fake window forwards them to the Java surface.
+
+`TITAN_VULKAN_LIB` must be an absolute path to the loader; `win32u` dlopens it instead of
+`SONAME_LIBVULKAN`, and a relative value logs an ERR and disables Vulkan. The radv-xclipse
+Android package is an adrenotools-style custom-driver zip (`meta.json`, `vulkan.radeon.so`,
+`NOTICE.txt`, `minApi: 34`) consumed by a custom-driver loader, not an AOSP ICD. The ICD
+enables the device-side `ANDROID_native_buffer` and
+`ANDROID_external_memory_android_hardware_buffer` (`src/amd/vulkan/radv_physical_device.c`)
+but no `VK_KHR_android_surface`, so the loader owns `vkCreateAndroidSurfaceKHR` and Android
+WSI, and the swapchain passes `buffer->handle` in `VkNativeBufferANDROID` for
+`radv_android.c` to import as a dma_buf fd. Wine only dlopens that loader; whether it
+advertises `VK_KHR_android_surface` is an on-device check, not something CI covers.
 
 `deps/patches/fex/` is `unixlib-android.patch` (no `librt`, `shm_open`/`shm_unlink`
 stubs) plus upstream `71444c94` (threads killed by `NtTerminateProcess` left FEX mutexes

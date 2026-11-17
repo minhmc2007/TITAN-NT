@@ -1,0 +1,176 @@
+From: TITAN-NT <titan@localhost>
+Date: Tue, 17 Nov 2026 13:30:00 +0700
+Subject: [PATCH] wineandroid: Forward the native window calls the Android Vulkan loader makes.
+
+The loader queries consumer usage and refresh cycle and sets dataspace,
+shared-buffer mode and dequeue timeout while creating a swapchain; an
+unhandled operation aborts it. Registration is asynchronous, so wait for the
+window instead of failing the host surface setup. 64-bit arguments cross the
+ioctl in two 32-bit halves to keep the PE/unix ABI unchanged.
+---
+diff --git a/dlls/wineandroid.drv/android_native.h b/dlls/wineandroid.drv/android_native.h
+--- a/dlls/wineandroid.drv/android_native.h
++++ b/dlls/wineandroid.drv/android_native.h
+@@ -119,7 +119,14 @@ enum native_window_perform
+     NATIVE_WINDOW_API_CONNECT                 = 13,
+     NATIVE_WINDOW_API_DISCONNECT              = 14,
+     NATIVE_WINDOW_SET_BUFFERS_USER_DIMENSIONS = 15,
+-    NATIVE_WINDOW_SET_POST_TRANSFORM_CROP     = 16
++    NATIVE_WINDOW_SET_POST_TRANSFORM_CROP     = 16,
++    NATIVE_WINDOW_SET_BUFFERS_DATASPACE       = 19,
++    NATIVE_WINDOW_SET_SHARED_BUFFER_MODE      = 21,
++    NATIVE_WINDOW_SET_AUTO_REFRESH            = 22,
++    NATIVE_WINDOW_GET_REFRESH_CYCLE_DURATION  = 23,
++    NATIVE_WINDOW_SET_USAGE64                 = 30,
++    NATIVE_WINDOW_GET_CONSUMER_USAGE64        = 31,
++    NATIVE_WINDOW_SET_DEQUEUE_TIMEOUT         = 37
+ };
+ 
+ enum native_window_api
+diff --git a/dlls/wineandroid.drv/device.c b/dlls/wineandroid.drv/device.c
+--- a/dlls/wineandroid.drv/device.c
++++ b/dlls/wineandroid.drv/device.c
+@@ -956,10 +956,38 @@ static NTSTATUS perform_ioctl( void *data, DWORD in_size, DWORD out_size, ULONG_
+     case NATIVE_WINDOW_SET_USAGE:
+     case NATIVE_WINDOW_SET_BUFFERS_TRANSFORM:
+     case NATIVE_WINDOW_SET_SCALING_MODE:
++    case NATIVE_WINDOW_SET_BUFFERS_DATASPACE:
++    case NATIVE_WINDOW_SET_SHARED_BUFFER_MODE:
++    case NATIVE_WINDOW_SET_AUTO_REFRESH:
+         wrap_java_call();
+         ret = parent->perform( parent, res->operation, res->args[0] );
+         unwrap_java_call();
+         break;
++    case NATIVE_WINDOW_SET_DEQUEUE_TIMEOUT:
++    {
++        uint64_t timeout = (uint32_t)res->args[0] | ((uint64_t)(uint32_t)res->args[1] << 32);
++        wrap_java_call();
++        ret = parent->perform( parent, res->operation, timeout );
++        unwrap_java_call();
++        break;
++    }
++    case NATIVE_WINDOW_SET_USAGE64:
++    {
++        uint64_t usage = (uint32_t)res->args[0] | ((uint64_t)(uint32_t)res->args[1] << 32);
++        wrap_java_call();
++        ret = parent->perform( parent, res->operation, usage );
++        unwrap_java_call();
++        break;
++    }
++    case NATIVE_WINDOW_GET_CONSUMER_USAGE64:
++    case NATIVE_WINDOW_GET_REFRESH_CYCLE_DURATION:
++    {
++        void *ptr = (void *)(uintptr_t)((uint32_t)res->args[0] | ((uint64_t)(uint32_t)res->args[1] << 32));
++        wrap_java_call();
++        ret = parent->perform( parent, res->operation, ptr );
++        unwrap_java_call();
++        break;
++    }
+     case NATIVE_WINDOW_SET_BUFFER_COUNT:
+         wrap_java_call();
+         ret = parent->perform( parent, res->operation, (size_t)res->args[0] );
+@@ -1387,13 +1415,21 @@ static int query( const ANativeWindow *window, int what, int *value )
+ {
+     struct native_win_wrapper *win = (struct native_win_wrapper *)window;
+     struct ioctl_android_query query;
+-    DWORD size = sizeof( query );
+-    int ret;
++    DWORD size;
++    int ret, i;
+ 
+     query.hdr.hwnd = HandleToLong( win->hwnd );
+     query.hdr.opengl = win->opengl;
+     query.what = what;
+-    ret = android_ioctl( IOCTL_QUERY, &query, sizeof(query), &query, &size );
++    /* the Java side registers the window asynchronously; wait for it instead of
++     * failing the host loader's surface setup */
++    for (i = 0; i < 1000; i++)
++    {
++        size = sizeof( query );
++        ret = android_ioctl( IOCTL_QUERY, &query, sizeof(query), &query, &size );
++        if (ret != -EWOULDBLOCK) break;
++        usleep( 1000 );
++    }
+     TRACE( "hwnd %p what %d got %d -> %p\n", win->hwnd, what, query.value, value );
+     if (!ret) *value = query.value;
+     return ret;
+@@ -1406,12 +1442,20 @@ static int perform( ANativeWindow *window, int operation, ... )
+         "SET_USAGE", "CONNECT", "DISCONNECT", "SET_CROP", "SET_BUFFER_COUNT", "SET_BUFFERS_GEOMETRY",
+         "SET_BUFFERS_TRANSFORM", "SET_BUFFERS_TIMESTAMP", "SET_BUFFERS_DIMENSIONS", "SET_BUFFERS_FORMAT",
+         "SET_SCALING_MODE", "LOCK", "UNLOCK_AND_POST", "API_CONNECT", "API_DISCONNECT",
+-        "SET_BUFFERS_USER_DIMENSIONS", "SET_POST_TRANSFORM_CROP"
++        "SET_BUFFERS_USER_DIMENSIONS", "SET_POST_TRANSFORM_CROP",
++        [NATIVE_WINDOW_SET_BUFFERS_DATASPACE]      = "SET_BUFFERS_DATASPACE",
++        [NATIVE_WINDOW_SET_SHARED_BUFFER_MODE]     = "SET_SHARED_BUFFER_MODE",
++        [NATIVE_WINDOW_SET_AUTO_REFRESH]           = "SET_AUTO_REFRESH",
++        [NATIVE_WINDOW_GET_REFRESH_CYCLE_DURATION] = "GET_REFRESH_CYCLE_DURATION",
++        [NATIVE_WINDOW_SET_USAGE64]                = "SET_USAGE64",
++        [NATIVE_WINDOW_GET_CONSUMER_USAGE64]       = "GET_CONSUMER_USAGE64",
++        [NATIVE_WINDOW_SET_DEQUEUE_TIMEOUT]        = "SET_DEQUEUE_TIMEOUT"
+     };
+ 
+     struct native_win_wrapper *win = (struct native_win_wrapper *)window;
+     struct ioctl_android_perform perf;
+     va_list args;
++    int res, i;
+ 
+     perf.hdr.hwnd  = HandleToLong( win->hwnd );
+     perf.hdr.opengl = win->opengl;
+@@ -1427,9 +1471,37 @@ static int perform( ANativeWindow *window, int operation, ... )
+     case NATIVE_WINDOW_SET_SCALING_MODE:
+     case NATIVE_WINDOW_API_CONNECT:
+     case NATIVE_WINDOW_API_DISCONNECT:
++    case NATIVE_WINDOW_SET_BUFFERS_DATASPACE:
++    case NATIVE_WINDOW_SET_SHARED_BUFFER_MODE:
++    case NATIVE_WINDOW_SET_AUTO_REFRESH:
+         perf.args[0] = va_arg( args, int );
+         TRACE( "hwnd %p %s arg %d\n", win->hwnd, names[operation], perf.args[0] );
+         break;
++    case NATIVE_WINDOW_SET_DEQUEUE_TIMEOUT:
++    {
++        uint64_t timeout = va_arg( args, int64_t );
++        perf.args[0] = (int)timeout;
++        perf.args[1] = (int)(timeout >> 32);
++        TRACE( "hwnd %p op %d arg %lld\n", win->hwnd, operation, (long long)timeout );
++        break;
++    }
++    case NATIVE_WINDOW_SET_USAGE64:
++    {
++        uint64_t usage = va_arg( args, uint64_t );
++        perf.args[0] = (int)usage;
++        perf.args[1] = (int)(usage >> 32);
++        TRACE( "hwnd %p op %d arg %llx\n", win->hwnd, operation, (unsigned long long)usage );
++        break;
++    }
++    case NATIVE_WINDOW_GET_CONSUMER_USAGE64:
++    case NATIVE_WINDOW_GET_REFRESH_CYCLE_DURATION:
++    {
++        uint64_t ptr = (uintptr_t)va_arg( args, void * );
++        perf.args[0] = (int)ptr;
++        perf.args[1] = (int)(ptr >> 32);
++        TRACE( "hwnd %p op %d ptr %p\n", win->hwnd, operation, (void *)(uintptr_t)ptr );
++        break;
++    }
+     case NATIVE_WINDOW_SET_BUFFER_COUNT:
+         perf.args[0] = va_arg( args, size_t );
+         TRACE( "hwnd %p %s count %d\n", win->hwnd, names[operation], perf.args[0] );
+@@ -1519,11 +1591,17 @@ static int perform( ANativeWindow *window, int operation, ... )
+     case NATIVE_WINDOW_SET_POST_TRANSFORM_CROP:
+     default:
+         FIXME( "unsupported perform hwnd %p op %d %s\n", win->hwnd, operation,
+-               operation < ARRAY_SIZE( names ) ? names[operation] : "???" );
++               operation < ARRAY_SIZE( names ) && names[operation] ? names[operation] : "???" );
+         break;
+     }
+     va_end( args );
+-    return android_ioctl( IOCTL_PERFORM, &perf, sizeof(perf), NULL, NULL );
++    for (i = 0; i < 1000; i++)
++    {
++        res = android_ioctl( IOCTL_PERFORM, &perf, sizeof(perf), NULL, NULL );
++        if (res != -EWOULDBLOCK) break;
++        usleep( 1000 );
++    }
++    return res;
+ }
+ 
+ struct ANativeWindow *create_ioctl_window( HWND hwnd, BOOL opengl, float scale )

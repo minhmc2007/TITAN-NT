@@ -1,0 +1,32 @@
+From: TITAN-NT <titan@localhost>
+Date: Tue, 17 Nov 2026 13:20:00 +0700
+Subject: [PATCH] winevulkan: Generate the Android surface entry point for drivers.
+
+The Android driver needs the host vkCreateAndroidSurfaceKHR, but make_vulkan
+drops platform=android extensions, so the generated header has no prototype or
+dispatch slot. Expose only VK_KHR_android_surface; applications still see
+Win32 surfaces through the client extension list.
+---
+diff --git a/dlls/winevulkan/make_vulkan b/dlls/winevulkan/make_vulkan
+--- a/dlls/winevulkan/make_vulkan
++++ b/dlls/winevulkan/make_vulkan
+@@ -133,6 +133,7 @@ UNEXPOSED_EXTENSIONS = {
+     "VK_KHR_external_memory_fd",
+     "VK_EXT_external_memory_metal",
+     "VK_KHR_external_semaphore_fd",
++    "VK_KHR_android_surface",
+     "VK_KHR_wayland_surface",
+     "VK_KHR_xlib_surface",
+     "VK_MVK_macos_surface",
+@@ -3263,7 +3264,10 @@ class VkRegistry(object):
+                     self._process_require_enum(enum_elem, ext, only_aliased=True)
+ 
+             platform = ext.attrib.get("platform")
+-            if platform and platform != "win32" and platform not in UNEXPOSED_PLATFORMS:
++            # VK_KHR_android_surface is the host-side counterpart of the Win32
++            # surface for wineandroid.drv; applications keep using Win32 surfaces.
++            if (platform and platform != "win32" and platform not in UNEXPOSED_PLATFORMS
++                    and not (platform == "android" and ext_name == "VK_KHR_android_surface")):
+                 LOGGER.debug("Skipping extensions {0} for platform {1}".format(ext_name, platform))
+                 skipped_exts.append(ext_name)
+                 return
