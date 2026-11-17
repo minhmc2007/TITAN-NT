@@ -240,15 +240,7 @@ static void probe_device(VkPhysicalDevice dev, uint32_t index) {
     VkPhysicalDeviceProperties props;
     memset(&props, 0, sizeof(props));
 
-    VkResult r = X18_CALL("vkGetPhysicalDeviceProperties", api.get_props(dev, &props));
-    if (r != VK_SUCCESS) {
-        snprintf(key, sizeof(key), "device.%u.properties", index);
-        res_fmt(key, "fail");
-        snprintf(key, sizeof(key), "device.%u.properties_result", index);
-        res_fmt(key, "%d", (int)r);
-        failures++;
-        return;
-    }
+    X18_VOID("vkGetPhysicalDeviceProperties", api.get_props(dev, &props));
 
     if (vk_id_count < sizeof(vk_ids) / sizeof(vk_ids[0])) {
         vk_ids[vk_id_count].vendor = props.vendorID;
@@ -279,20 +271,14 @@ static void probe_device(VkPhysicalDevice dev, uint32_t index) {
 
     VkPhysicalDeviceFeatures features;
     memset(&features, 0, sizeof(features));
-    r = X18_CALL("vkGetPhysicalDeviceFeatures", api.get_features(dev, &features));
+    X18_VOID("vkGetPhysicalDeviceFeatures", api.get_features(dev, &features));
     snprintf(key, sizeof(key), "device.%u.features", index);
-    res_fmt(key, "%s", r == VK_SUCCESS ? "ok" : "fail");
-    if (r != VK_SUCCESS)
-        failures++;
+    res_fmt(key, "ok");
 
     uint32_t qcount = 0;
-    r = X18_CALL("vkGetPhysicalDeviceQueueFamilyProperties", api.get_queues(dev, &qcount, NULL));
+    X18_VOID("vkGetPhysicalDeviceQueueFamilyProperties", api.get_queues(dev, &qcount, NULL));
     snprintf(key, sizeof(key), "device.%u.queue_families_result", index);
-    res_fmt(key, "%d", (int)r);
-    if (r != VK_SUCCESS) {
-        failures++;
-        qcount = 0;
-    }
+    res_fmt(key, "ok");
 
     VkQueueFamilyProperties *queues = NULL;
     if (qcount) {
@@ -303,12 +289,8 @@ static void probe_device(VkPhysicalDevice dev, uint32_t index) {
         }
     }
     if (qcount) {
-        r = X18_CALL("vkGetPhysicalDeviceQueueFamilyProperties",
-                     api.get_queues(dev, &qcount, queues));
-        if (r != VK_SUCCESS) {
-            failures++;
-            qcount = 0;
-        }
+        X18_VOID("vkGetPhysicalDeviceQueueFamilyProperties",
+                 api.get_queues(dev, &qcount, queues));
     }
     snprintf(key, sizeof(key), "device.%u.queue_families", index);
     res_fmt(key, "%u", qcount);
@@ -337,11 +319,9 @@ static void probe_device(VkPhysicalDevice dev, uint32_t index) {
 
     VkPhysicalDeviceMemoryProperties mem;
     memset(&mem, 0, sizeof(mem));
-    r = X18_CALL("vkGetPhysicalDeviceMemoryProperties", api.get_memory(dev, &mem));
+    X18_VOID("vkGetPhysicalDeviceMemoryProperties", api.get_memory(dev, &mem));
     snprintf(key, sizeof(key), "device.%u.memory_properties", index);
-    res_fmt(key, "%s", r == VK_SUCCESS ? "ok" : "fail");
-    if (r != VK_SUCCESS)
-        failures++;
+    res_fmt(key, "ok");
 
     snprintf(key, sizeof(key), "device.%u.memory_heaps", index);
     res_fmt(key, "%u", mem.memoryHeapCount);
@@ -364,7 +344,7 @@ static void probe_device(VkPhysicalDevice dev, uint32_t index) {
     }
 
     uint32_t ext_count = 0;
-    r = X18_CALL("vkEnumerateDeviceExtensionProperties",
+    VkResult r = X18_CALL("vkEnumerateDeviceExtensionProperties",
                  api.enum_dev_ext(dev, NULL, &ext_count, NULL));
     snprintf(key, sizeof(key), "device.%u.device_extensions_result", index);
     res_fmt(key, "%d", (int)r);
@@ -427,41 +407,37 @@ static void probe_device(VkPhysicalDevice dev, uint32_t index) {
             props2.pNext = &pci;
         }
 
-        r = X18_CALL("vkGetPhysicalDeviceProperties2", api.get_props2(dev, &props2));
+        X18_VOID("vkGetPhysicalDeviceProperties2", api.get_props2(dev, &props2));
         snprintf(key, sizeof(key), "device.%u.properties2", index);
-        res_fmt(key, "%s", r == VK_SUCCESS ? "ok" : "fail");
-        if (r != VK_SUCCESS) {
-            failures++;
+        res_fmt(key, "ok");
+        if (want_driver) {
+            snprintf(key, sizeof(key), "device.%u.driver_name", index);
+            res_fixed(key, drv.driverName, sizeof(drv.driverName));
+            snprintf(key, sizeof(key), "device.%u.driver_info", index);
+            res_fixed(key, drv.driverInfo, sizeof(drv.driverInfo));
+            snprintf(key, sizeof(key), "device.%u.driver_id", index);
+            res_fmt(key, "%d", (int)drv.driverID);
+            snprintf(key, sizeof(key), "device.%u.driver_properties", index);
+            res_fmt(key, "1");
         } else {
-            if (want_driver) {
-                snprintf(key, sizeof(key), "device.%u.driver_name", index);
-                res_fixed(key, drv.driverName, sizeof(drv.driverName));
-                snprintf(key, sizeof(key), "device.%u.driver_info", index);
-                res_fixed(key, drv.driverInfo, sizeof(drv.driverInfo));
-                snprintf(key, sizeof(key), "device.%u.driver_id", index);
-                res_fmt(key, "%d", (int)drv.driverID);
-                snprintf(key, sizeof(key), "device.%u.driver_properties", index);
-                res_fmt(key, "1");
-            } else {
-                snprintf(key, sizeof(key), "device.%u.driver_properties", index);
-                res_fmt(key, "0");
-            }
+            snprintf(key, sizeof(key), "device.%u.driver_properties", index);
+            res_fmt(key, "0");
+        }
 
-            if (has_pci) {
-                snprintf(key, sizeof(key), "device.%u.pci.domain", index);
-                res_fmt(key, "%u", pci.pciDomain);
-                snprintf(key, sizeof(key), "device.%u.pci.bus", index);
-                res_fmt(key, "%u", pci.pciBus);
-                snprintf(key, sizeof(key), "device.%u.pci.device", index);
-                res_fmt(key, "%u", pci.pciDevice);
-                snprintf(key, sizeof(key), "device.%u.pci.function", index);
-                res_fmt(key, "%u", pci.pciFunction);
-                snprintf(key, sizeof(key), "device.%u.pci_bus_info", index);
-                res_fmt(key, "1");
-            } else {
-                snprintf(key, sizeof(key), "device.%u.pci_bus_info", index);
-                res_fmt(key, "0");
-            }
+        if (has_pci) {
+            snprintf(key, sizeof(key), "device.%u.pci.domain", index);
+            res_fmt(key, "%u", pci.pciDomain);
+            snprintf(key, sizeof(key), "device.%u.pci.bus", index);
+            res_fmt(key, "%u", pci.pciBus);
+            snprintf(key, sizeof(key), "device.%u.pci.device", index);
+            res_fmt(key, "%u", pci.pciDevice);
+            snprintf(key, sizeof(key), "device.%u.pci.function", index);
+            res_fmt(key, "%u", pci.pciFunction);
+            snprintf(key, sizeof(key), "device.%u.pci_bus_info", index);
+            res_fmt(key, "1");
+        } else {
+            snprintf(key, sizeof(key), "device.%u.pci_bus_info", index);
+            res_fmt(key, "0");
         }
     }
 
@@ -475,18 +451,14 @@ static void probe_device(VkPhysicalDevice dev, uint32_t index) {
         mem2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2;
         mem2.pNext = &budget;
 
-        r = X18_CALL("vkGetPhysicalDeviceMemoryProperties2", api.get_memory2(dev, &mem2));
+        X18_VOID("vkGetPhysicalDeviceMemoryProperties2", api.get_memory2(dev, &mem2));
         snprintf(key, sizeof(key), "device.%u.memory_budget", index);
-        res_fmt(key, "%s", r == VK_SUCCESS ? "ok" : "fail");
-        if (r != VK_SUCCESS) {
-            failures++;
-        } else {
-            for (uint32_t i = 0; i < mem.memoryHeapCount; i++) {
-                snprintf(key, sizeof(key), "device.%u.heap.%u.budget", index, i);
-                res_fmt(key, "%llu", (unsigned long long)budget.heapBudget[i]);
-                snprintf(key, sizeof(key), "device.%u.heap.%u.usage", index, i);
-                res_fmt(key, "%llu", (unsigned long long)budget.heapUsage[i]);
-            }
+        res_fmt(key, "ok");
+        for (uint32_t i = 0; i < mem.memoryHeapCount; i++) {
+            snprintf(key, sizeof(key), "device.%u.heap.%u.budget", index, i);
+            res_fmt(key, "%llu", (unsigned long long)budget.heapBudget[i]);
+            snprintf(key, sizeof(key), "device.%u.heap.%u.usage", index, i);
+            res_fmt(key, "%llu", (unsigned long long)budget.heapUsage[i]);
         }
     } else {
         snprintf(key, sizeof(key), "device.%u.memory_budget", index);
