@@ -71,6 +71,50 @@ stubs) plus upstream `71444c94` (threads killed by `NtTerminateProcess` left FEX
 held), both from `amphora-engine`.
 
 
+## GPU dependency build (`ci-deps-gpu.yml`)
+
+| Item | Version | Source |
+| --- | --- | --- |
+| Android NDK | `30.0.16248370` | preinstalled on `ubuntu-latest` |
+| llvm-mingw | `20260721` (ucrt, x86_64 host) | `mstorsjo/llvm-mingw` release asset |
+| RADV target | `aarch64-linux-android34` | `radv-xclipse` `build.sh` recipe |
+| DXVK target | `arm64ec-w64-mingw32` | llvm-mingw clang wrappers |
+| vkd3d target | `arm64ec-w64-mingw32` with `-marm64x` | llvm-mingw clang wrappers |
+
+`radv-xclipse` `v1.9.0` is built with the driver's own `build.sh` options except
+`-Dbuildtype=release` and the TITAN code-generation flags
+`-march=armv8.2-a -ffixed-x18 -fno-sanitize=shadow-call-stack`. The published
+`v1.9.0` binary does use x18 (a context-restore stub at `0x10c4390` reads
+`ldp x18, x19, [x0, #0x90]`), so the CI job disassembles both the unstripped and
+stripped driver and fails if any `x18`/`w18` operand remains. The archive uses the
+release `meta.json` contract (`schemaVersion: 1`, `libraryName: "vulkan.radeon.so"`)
+and the job fails on any NEEDED entry outside
+`libhardware.so liblog.so libnativewindow.so libsync.so libm.so libdl.so libc.so`.
+
+DXVK `v3.1.1` has no ARM64EC machine file and `meson.build` passes
+`-msse -msse2 -msse3 -mfpmath=sse` unconditionally. `deps/patches/dxvk/0001-arm64ec.patch`
+gates those flags to x86/x86_64 and adds `__arm64ec__` to the `DXVK_ARCH_ARM64`
+branch so the ARM64 `yield` path is used. It is adapted from
+`orchardxr/varbor-engines` commit `4c78a2e7a8585c21d76dc75679bf251363ac02c3`,
+`patches/dxvk/cxaddon-1.10.3/0002-arm64ec.patch` (written for DXVK 1.10.3). The
+other hunks in that patch are not needed here: v3.1.1 already guards
+`__arm64ec__` in `util_bit.h`, `util_hotpatch.h` and `d3d9_device.cpp`, keeps
+`D3DDEVINFO_RESOURCEMANAGER` inside `namespace dxvk`, includes `<algorithm>` in
+`src/util/config/config.cpp`, and no longer has `replaceNaN` or
+`d3d10_interfaces.h`.
+
+vkd3d-proton `v3.1` ships `build-arm64x.txt` but names
+`arm64ec-w64-mingw32-gcc`/`g++`, and `meson.build` passes `-msse`/`-msse2`
+unconditionally. `deps/patches/vkd3d/0001-arm64ec.patch` switches the machine file
+to the llvm-mingw clang wrappers, keeps `-marm64x`, and gates the SSE flags to x86.
+The `widl` requirement is met by llvm-mingw's
+`arm64ec-w64-mingw32-widl` through `widl-mingw-tools-fallback`; no Wine build is
+needed in the job.
+
+All three jobs publish workflow artifacts only (`retention-days: 30`); nothing is
+attached to a GitHub Release.
+
+
 ## Fork policy
 
 No fork exists yet. Forks are created only when a milestone needs a patch, and the patch

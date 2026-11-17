@@ -1,0 +1,47 @@
+From: TITAN-NT <titan@localhost>
+Subject: [PATCH] build: gate x86 SIMD flags, treat ARM64EC as ARM64
+
+diff --git a/meson.build b/meson.build
+index 4964301..93b50d8 100644
+--- a/meson.build
++++ b/meson.build
+@@ -10,10 +10,6 @@ cc = meson.get_compiler('c')
+ dxvk_is_msvc = cpp.get_argument_syntax() == 'msvc'
+ 
+ compiler_args = [
+-  '-msse',
+-  '-msse2',
+-  '-msse3',
+-  '-mfpmath=sse',
+   '-Wimplicit-fallthrough',
+   # gcc
+   '-Wno-missing-field-initializers',
+@@ -28,6 +24,15 @@ compiler_args = [
+   '-Wno-missing-braces',
+ ]
+ 
++if cpu_family == 'x86' or cpu_family == 'x86_64'
++  compiler_args += [
++    '-msse',
++    '-msse2',
++    '-msse3',
++    '-mfpmath=sse',
++  ]
++endif
++
+ link_args = []
+ 
+ if get_option('build_id')
+diff --git a/src/util/util_bit.h b/src/util/util_bit.h
+index 11e20d1..777c528 100644
+--- a/src/util/util_bit.h
++++ b/src/util/util_bit.h
+@@ -6,7 +6,7 @@
+   #if defined(__x86_64__) || defined(_M_X64) || defined(__e2k__)
+     #define DXVK_ARCH_X86_64
+   #endif
+-#elif defined(__aarch64__) || defined(_M_ARM64) || defined(_M_ARM64EC)
++#elif defined(__aarch64__) || defined(_M_ARM64) || defined(_M_ARM64EC) || defined(__arm64ec__)
+   #define DXVK_ARCH_ARM64
+ #endif
+ 

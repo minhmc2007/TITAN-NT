@@ -1,0 +1,39 @@
+From: TITAN-NT <titan@localhost>
+Subject: [PATCH] build: gate x86 SIMD flags and use the llvm-mingw ARM64EC wrappers
+
+diff --git a/build-arm64x.txt b/build-arm64x.txt
+index 8be43dc..ac6e58b 100644
+--- a/build-arm64x.txt
++++ b/build-arm64x.txt
+@@ -1,6 +1,6 @@
+ [binaries]
+-c = 'arm64ec-w64-mingw32-gcc'
+-cpp = 'arm64ec-w64-mingw32-g++'
++c = 'arm64ec-w64-mingw32-clang'
++cpp = 'arm64ec-w64-mingw32-clang++'
+ ar = 'arm64ec-w64-mingw32-ar'
+ strip = 'arm64ec-w64-mingw32-strip'
+ widl-mingw-tools-fallback = 'arm64ec-w64-mingw32-widl'
+diff --git a/meson.build b/meson.build
+index 6fa1a1f..6e3da75 100644
+--- a/meson.build
++++ b/meson.build
+@@ -102,10 +102,16 @@ else
+   error('Unknown platform')
+ endif
+ 
++if cpu_family == 'x86' or cpu_family == 'x86_64'
++  add_project_arguments(vkd3d_compiler.get_supported_arguments([
++      '-msse',
++      '-msse2',
++    ]),
++    language : 'c')
++endif
++
+ add_project_arguments(vkd3d_compiler.get_supported_arguments([
+     '-fvisibility=hidden',
+-    '-msse',
+-    '-msse2',
+     # For some reason, the use of VLAs isn't in all+extra+pedantic
+     # We don't want to use these accidentally from consts...
+     '-Wvla',
