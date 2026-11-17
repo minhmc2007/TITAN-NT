@@ -1,0 +1,31 @@
+From: TITAN-NT <titan@localhost>
+Date: Tue, 17 Nov 2026 10:00:00 +0700
+Subject: [PATCH] wineandroid: Drop the Gradle APK target from the cross build.
+
+The Java host APK is built by TITAN's own ci-m3-apk job, and the cross build
+runner has no Android SDK or Gradle. Keeping EXTRA_TARGETS makes plain make
+invoke gradle for a file nothing in the Wine install consumes.
+---
+diff --git a/configure.ac b/configure.ac
+--- a/configure.ac
++++ b/configure.ac
+@@ -3849,10 +3849,7 @@
+ [dlls/ntdll/unix/version.c: dummy
+ 	@version=\`(GIT_DIR=${wine_srcdir}.git git describe HEAD 2>/dev/null || echo \"wine-\$(PACKAGE_VERSION)\") | sed -n -e '\$\$s/\(.*\)/const char wine_build[[]] = \"\\1\";/p'\` && (echo \$\$version | cmp -s - \$[@]) || echo \$\$version >\$[@] || (rm -f \$[@] && exit 1)
+ programs/winetest/build.rc: dummy
+-	@build=\"STRINGTABLE { 1 \\\"\`GIT_DIR=${wine_srcdir}.git git rev-parse HEAD 2>/dev/null\`\\\" }\" && (echo \$\$build | cmp -s - \$[@]) || echo \$\$build >\$[@] || (rm -f \$[@] && exit 1)
+-dlls/wineandroid.drv/wine-debug.apk: dlls/wineandroid.drv/build.gradle ${wine_srcdir}dlls/wineandroid.drv/AndroidManifest.xml ${wine_srcdir}dlls/wineandroid.drv/WineActivity.java ${wine_srcdir}dlls/wineandroid.drv/wine.svg
+-	cd dlls/wineandroid.drv && gradle -q -Psrcdir=$srcdir assembleDebug
+-	mv dlls/wineandroid.drv/build/outputs/apk/wine-debug.apk \$[@]])
++	@build=\"STRINGTABLE { 1 \\\"\`GIT_DIR=${wine_srcdir}.git git rev-parse HEAD 2>/dev/null\`\\\" }\" && (echo \$\$build | cmp -s - \$[@]) || echo \$\$build >\$[@] || (rm -f \$[@] && exit 1)])
+ 
+ dnl Misc rules
+ 
+diff --git a/dlls/wineandroid.drv/Makefile.in b/dlls/wineandroid.drv/Makefile.in
+--- a/dlls/wineandroid.drv/Makefile.in
++++ b/dlls/wineandroid.drv/Makefile.in
+@@ -13,4 +13,3 @@
+ 	window.c \
+ 	wine.svg
+ 
+-EXTRA_TARGETS = wine-debug.apk

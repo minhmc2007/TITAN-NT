@@ -1,0 +1,19 @@
+From: TITAN-NT <titan@localhost>
+Date: Tue, 17 Nov 2026 13:10:00 +0700
+Subject: [PATCH] wineandroid: Pass the start-device callback as a client pointer.
+
+The unixlib init params carry the callback as UINT64; assigning a function
+pointer directly fails the PE build now that the driver is enabled.
+---
+diff --git a/dlls/wineandroid.drv/dllmain.c b/dlls/wineandroid.drv/dllmain.c
+--- a/dlls/wineandroid.drv/dllmain.c
++++ b/dlls/wineandroid.drv/dllmain.c
+@@ -123,6 +123,6 @@ BOOL WINAPI DllMain( HINSTANCE inst, DWORD reason, LPVOID reserved )
+     if (__wine_init_unix_call()) return FALSE;
+ 
+     params.register_window_callback = register_window_callback;
+-    params.start_device_callback = android_start_device;
++    params.start_device_callback = (UINT_PTR)android_start_device;
+     return !ANDROID_CALL( init, &params );
+ }
+ 

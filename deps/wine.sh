@@ -27,8 +27,9 @@ configure_flags=(
   --disable-win16
   # amd_ags_x64 needs libdrm, which is not in the NDK sysroot.
   --disable-amd_ags_x64
-  # M2 is headless; the Android display driver needs the M3 ABI patches.
-  --disable-wineandroid_drv
+  # explorer only loads this driver for /desktop=...,android or an explicit
+  # HKCU\Software\Wine\Drivers\Graphics value, so headless wineboot keeps nulldrv.
+  --enable-wineandroid_drv
   --without-alsa --without-capi --without-coreaudio --without-cups --without-dbus
   --without-ffmpeg --without-fontconfig --without-freetype
   --without-gettext --with-gettextpo=no
@@ -36,7 +37,7 @@ configure_flags=(
   --without-inotify --without-krb5 --without-netapi --without-opencl --without-oss
   --without-pcap --without-pcsclite --without-piper --without-pulse --without-sane
   --without-sdl --without-udev --without-unwind --without-usb --without-v4l2
-  --without-vosk --without-vulkan --without-wayland --without-x
+  --without-vosk --without-wayland --without-x
 )
 
 target_env() {
@@ -94,6 +95,11 @@ for f in bin/wineserver \
          lib/wine/aarch64-unix/wine \
          lib/wine/aarch64-unix/ntdll.so \
          lib/wine/aarch64-unix/win32u.so \
+         lib/wine/aarch64-unix/wineandroid.so \
+         lib/wine/aarch64-unix/winevulkan.so \
+         lib/wine/aarch64-windows/wineandroid.drv \
+         lib/wine/aarch64-windows/winevulkan.dll \
+         lib/wine/aarch64-windows/vulkan-1.dll \
          lib/wine/aarch64-windows/ntdll.dll \
          lib/wine/aarch64-windows/kernelbase.dll \
          lib/wine/i386-windows/ntdll.dll \
@@ -102,6 +108,13 @@ for f in bin/wineserver \
          share/wine/nls/l_intl.nls; do
   test -f "$PREFIX/$f" || { echo "missing: $f" >&2; exit 1; }
 done
+
+# winevulkan.so must dlopen the host loader at runtime; a build-time NEEDED
+# entry would pin the system loader and bypass TITAN_VULKAN_LIB.
+needed=$("$NDK_BIN/llvm-readelf" -dW "$PREFIX/lib/wine/aarch64-unix/winevulkan.so" | grep NEEDED)
+case "$needed" in
+  *libvulkan*) echo "winevulkan.so is linked to libvulkan" >&2; exit 1 ;;
+esac
 
 # The preloader is a static ET_EXEC; Android only starts app-private binaries
 # through /system/bin/linker64, so its presence means patch 0001 was lost.

@@ -1,0 +1,41 @@
+From: TITAN-NT <titan@localhost>
+Date: Tue, 17 Nov 2026 13:35:00 +0700
+Subject: [PATCH] win32u: Let TITAN_VULKAN_LIB select the Vulkan loader.
+
+TITAN ships radv-xclipse through a custom-driver loader outside the system
+paths, and the built-in SONAME resolves to the AOSP loader, which cannot see
+it. Require an absolute path so a stray relative value cannot silently pick a
+different loader.
+---
+diff --git a/dlls/win32u/vulkan.c b/dlls/win32u/vulkan.c
+--- a/dlls/win32u/vulkan.c
++++ b/dlls/win32u/vulkan.c
+@@ -4098,14 +4098,24 @@ static void vulkan_init_once(void)
+     VkResult res;
+ 
+     const char *env = getenv( "WINE_DISABLE_FULLSCREEN_HACK" );
++    const char *vulkan_lib = getenv( "TITAN_VULKAN_LIB" );
+     fshack_enabled = !env || !atoi( env );
+ 
++    if (vulkan_lib && vulkan_lib[0] != '/')
++    {
++        ERR( "TITAN_VULKAN_LIB must be an absolute path: %s\n", vulkan_lib );
++        return;
++    }
+ #ifdef SONAME_LIBVULKAN
+-    vulkan_handle = dlopen( SONAME_LIBVULKAN, RTLD_NOW );
+-    if (!vulkan_handle) ERR( "Failed to load %s\n", SONAME_LIBVULKAN );
+-#else
+-    ERR( "Wine was built without Vulkan support.\n" );
++    if (!vulkan_lib) vulkan_lib = SONAME_LIBVULKAN;
+ #endif
++    if (!vulkan_lib)
++    {
++        ERR( "Wine was built without Vulkan support.\n" );
++        return;
++    }
++    vulkan_handle = dlopen( vulkan_lib, RTLD_NOW );
++    if (!vulkan_handle) ERR( "Failed to load %s\n", vulkan_lib );
+     if (!vulkan_handle) return;
+ 
+ #define LOAD_FUNCPTR( f )                                                                          \
