@@ -67,6 +67,7 @@ provenance:
 | `0008-ntdll-android-no-userfaultfd` | TITAN | upstream hardcodes the x86_64 `userfaultfd` number for every arch; arm64 is 282 and Android traps it |
 | `0009-wineandroid-no-gradle-apk` | TITAN | the cross build has no Android SDK/Gradle; the Java host APK belongs to `ci-m3-apk` |
 | `0010-wineandroid-driver-api-port` | TITAN | upstream's win32u drawable refactor left the unbuilt driver with a stale prototype and surface-create signature |
+| `0011-wineandroid-start-device-callback` | TITAN | the unixlib init params carry the start-device callback as a client pointer, not a function pointer |
 
 `dlls/wineandroid.drv` is compiled in the `ci-deps-cpu` wine job since Milestone 3. It is
 not a default display driver: `programs/explorer/desktop.c` keeps `mac,x11,wayland` as its
