@@ -1,0 +1,231 @@
+name: ci-deps-gpu
+
+on:
+  push:
+    paths:
+      - deps/**
+      - .github/workflows/ci-deps-gpu.yml
+  workflow_dispatch:
+
+concurrency:
+  group: ci-deps-gpu-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  NDK_VERSION: 30.0.16248370
+  LLVM_MINGW: "20260721"
+  RADV_TAG: v1.9.0
+  RADV_COMMIT: cc87fdf71267dd0acc3b470920a6566a1a46f0be
+  DXVK_TAG: v3.1.1
+  DXVK_COMMIT: b1a1c99ab52b687cf950d62c88bc2fa316b41663
+  VKD3D_TAG: v3.1
+  VKD3D_COMMIT: 4522cc1a8b1347f1ab1b0f7b14a23ed9444d95d1
+
+jobs:
+  radv:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Free disk
+        run: |
+          set -euo pipefail
+          sudo rm -rf /usr/share/dotnet /usr/local/share/boost /opt/ghc \
+            /usr/local/lib/android/sdk/emulator /usr/local/lib/android/sdk/system-images
+          sudo apt-get clean
+          df -h / | tail -1
+
+      - name: Toolchain
+        run: |
+          set -euo pipefail
+          echo "ANDROID_NDK_HOME=/usr/local/lib/android/sdk/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+          echo "TOOLCHAIN_DIR=$RUNNER_TEMP/toolchain" >> "$GITHUB_ENV"
+
+      - uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/toolchain
+          key: toolchain-${{ env.LLVM_MINGW }}
+
+      - name: Install llvm-mingw
+        run: bash deps/toolchain.sh
+
+      - name: Install build tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ninja-build python3-mako python3-yaml \
+            python3-packaging python3-pip glslang-tools zstd
+          python3 -m pip install --user --break-system-packages 'meson>=1.4'
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Fetch radv
+        run: |
+          set -euo pipefail
+          git clone -q --depth 1 --branch "$RADV_TAG" \
+            https://github.com/JimVulkan/radv-xclipse.git src/radv
+          cd src/radv
+          test "$(git rev-parse HEAD)" = "$RADV_COMMIT" || {
+            echo "radv commit mismatch"; exit 1;
+          }
+
+      - name: Build radv
+        env:
+          RADV_SRC: ${{ github.workspace }}/src/radv
+          RADV_OUT: ${{ github.workspace }}/build/radv
+        run: |
+          set -euo pipefail
+          meson --version
+          bash deps/radv.sh
+          ls -l build/radv/dist/
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: radv-xclipse
+          path: build/radv/dist/radv-xclipse.tar.zst
+          if-no-files-found: error
+          retention-days: 30
+
+  dxvk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Free disk
+        run: |
+          set -euo pipefail
+          sudo rm -rf /usr/share/dotnet /usr/local/share/boost /opt/ghc \
+            /usr/local/lib/android/sdk/emulator /usr/local/lib/android/sdk/system-images
+          sudo apt-get clean
+          df -h / | tail -1
+
+      - name: Toolchain
+        run: |
+          set -euo pipefail
+          echo "ANDROID_NDK_HOME=/usr/local/lib/android/sdk/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+          echo "TOOLCHAIN_DIR=$RUNNER_TEMP/toolchain" >> "$GITHUB_ENV"
+
+      - uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/toolchain
+          key: toolchain-${{ env.LLVM_MINGW }}
+
+      - name: Install llvm-mingw
+        run: bash deps/toolchain.sh
+
+      - name: Install build tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ninja-build python3-pip glslang-tools zstd
+          python3 -m pip install --user --break-system-packages 'meson>=1.4'
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Fetch DXVK
+        run: |
+          set -euo pipefail
+          git clone -q --depth 1 --branch "$DXVK_TAG" \
+            https://github.com/doitsujin/dxvk.git src/dxvk
+          cd src/dxvk
+          test "$(git rev-parse HEAD)" = "$DXVK_COMMIT" || {
+            echo "DXVK commit mismatch"; exit 1;
+          }
+          git submodule update -q --init --recursive --depth 1
+          for p in ../../deps/patches/dxvk/*.patch; do
+            patch -p1 --forward --batch < "$p"
+          done
+          test -z "$(find . -name '*.rej')" || { echo "patch rejects"; exit 1; }
+
+      - name: Build DXVK
+        env:
+          DXVK_SRC: ${{ github.workspace }}/src/dxvk
+          DXVK_OUT: ${{ github.workspace }}/build/dxvk
+          LLVM_MINGW_ROOT: ${{ runner.temp }}/toolchain/llvm-mingw
+        run: |
+          set -euo pipefail
+          meson --version
+          bash deps/dxvk.sh
+          ls -l build/dxvk/dist/
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dxvk-arm64ec
+          path: build/dxvk/dist/dxvk-arm64ec.tar.zst
+          if-no-files-found: error
+          retention-days: 30
+
+  vkd3d:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      # Hybrid ARM64X libraries landed after 20260721.
+      LLVM_MINGW: "20260908"
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Free disk
+        run: |
+          set -euo pipefail
+          sudo rm -rf /usr/share/dotnet /usr/local/share/boost /opt/ghc \
+            /usr/local/lib/android/sdk/emulator /usr/local/lib/android/sdk/system-images
+          sudo apt-get clean
+          df -h / | tail -1
+
+      - name: Toolchain
+        run: |
+          set -euo pipefail
+          echo "ANDROID_NDK_HOME=/usr/local/lib/android/sdk/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+          echo "TOOLCHAIN_DIR=$RUNNER_TEMP/toolchain" >> "$GITHUB_ENV"
+
+      - uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/toolchain
+          key: toolchain-${{ env.LLVM_MINGW }}
+
+      - name: Install llvm-mingw
+        run: bash deps/toolchain.sh
+
+      - name: Install build tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ninja-build python3-pip glslang-tools zstd
+          python3 -m pip install --user --break-system-packages 'meson>=1.4'
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Fetch vkd3d-proton
+        run: |
+          set -euo pipefail
+          git clone -q --depth 1 --branch "$VKD3D_TAG" \
+            https://github.com/HansKristian-Work/vkd3d-proton.git src/vkd3d
+          cd src/vkd3d
+          test "$(git rev-parse HEAD)" = "$VKD3D_COMMIT" || {
+            echo "vkd3d commit mismatch"; exit 1;
+          }
+          git submodule update -q --init --recursive --depth 1
+          for p in ../../deps/patches/vkd3d/*.patch; do
+            patch -p1 --forward --batch < "$p"
+          done
+          test -z "$(find . -name '*.rej')" || { echo "patch rejects"; exit 1; }
+
+      - name: Build vkd3d-proton
+        env:
+          VKD3D_SRC: ${{ github.workspace }}/src/vkd3d
+          VKD3D_OUT: ${{ github.workspace }}/build/vkd3d
+          LLVM_MINGW_ROOT: ${{ runner.temp }}/toolchain/llvm-mingw
+        run: |
+          set -euo pipefail
+          meson --version
+          bash deps/vkd3d.sh
+          ls -l build/vkd3d/dist/
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: vkd3d-arm64x
+          path: build/vkd3d/dist/vkd3d-arm64x.tar.zst
+          if-no-files-found: error
+          retention-days: 30
