@@ -3,7 +3,11 @@ name: ci-m3-probe
 on:
   push:
     branches:
-      - m3/vk-probe
+      - main
+    paths:
+      - native/tools/vk_probe/**
+      - tests/vk/**
+      - .github/workflows/ci-m3-probe.yml
   workflow_dispatch:
     inputs:
       gpu_run_id:
