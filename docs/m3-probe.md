@@ -40,7 +40,7 @@ path.
 | `renderD129` | `DRIVER=exynos-drm`, DRM `exynos-drmdpu` 1.0.0 |
 
 `renderD128` is the Xclipse 530; `renderD129` is the display controller. The raw log is
-`probe-out/m3-vk-probe.log`.
+`docs/evidence/m3-vk-probe.log`, captured from the artifact built at `0f0fff3`.
 
 `linker64` rejects relative program paths and `dlopen` does not search the working directory,
 so the runner passes absolute paths for both the probe and the ICD.
