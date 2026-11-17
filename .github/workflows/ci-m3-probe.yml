@@ -1,0 +1,183 @@
+name: ci-m3-probe
+
+on:
+  push:
+    branches:
+      - m3/vk-probe
+  workflow_dispatch:
+    inputs:
+      gpu_run_id:
+        description: ci-deps-gpu run id that produced the radv-xclipse artifact
+        required: false
+        default: ""
+
+concurrency:
+  group: ci-m3-probe-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  NDK_VERSION: 30.0.16248370
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Locate NDK
+        run: |
+          set -euo pipefail
+          echo "NDK=/usr/local/lib/android/sdk/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+          test -x "/usr/local/lib/android/sdk/ndk/$NDK_VERSION/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" \
+            || { echo "NDK $NDK_VERSION missing from runner image"; exit 1; }
+
+      - name: Build vk_probe
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          BIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          cc="$BIN/aarch64-linux-android34-clang"
+          "$cc" -O2 -Wall -Wextra -fPIE -pie \
+            -ffixed-x18 -fno-sanitize=shadow-call-stack \
+            -march=armv8.2-a+lse \
+            -Wl,--dynamic-linker=/system/bin/linker64 \
+            -o dist/vk_probe native/tools/vk_probe/vk_probe.c -ldl
+          "$BIN/llvm-readelf" -h -l dist/vk_probe > dist/vk_probe.elf.txt
+          grep -q 'AArch64' dist/vk_probe.elf.txt || { echo "vk_probe is not AArch64"; exit 1; }
+          grep -q 'Type:.*DYN' dist/vk_probe.elf.txt || { echo "vk_probe is not a PIE"; exit 1; }
+          grep -q 'Requesting program interpreter: /system/bin/linker64' dist/vk_probe.elf.txt \
+            || { echo "vk_probe has no Android dynamic linker"; exit 1; }
+          "$BIN/llvm-readelf" -dW dist/vk_probe > dist/vk_probe.dyn.txt
+          if grep -q 'libvulkan' dist/vk_probe.dyn.txt; then
+            echo "vk_probe must not link libvulkan"
+            exit 1
+          fi
+          node scripts/dso_x18_scan.mjs --expect-zero dist/vk_probe
+
+      - name: Resolve ci-deps-gpu run
+        id: gpu
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GPU_RUN_ID: ${{ inputs.gpu_run_id }}
+        run: |
+          set -euo pipefail
+          if [ -n "$GPU_RUN_ID" ]; then
+            id=$GPU_RUN_ID
+          else
+            if ! id=$(gh run list --workflow ci-deps-gpu.yml --status success --limit 1 \
+                         --json databaseId --jq '.[0].databaseId // empty' 2>&1); then
+              echo "::error::ci-deps-gpu workflow lookup failed: $id"
+              exit 1
+            fi
+          fi
+          if [ -z "$id" ]; then
+            echo "::error::no successful ci-deps-gpu run; pass gpu_run_id once radv-xclipse exists"
+            exit 1
+          fi
+          state=$(gh run view "$id" --json status,conclusion --jq '"\(.status)/\(.conclusion)"')
+          if [ "$state" != "completed/success" ]; then
+            # Only radv matters here; a failed sibling job still ships its artifact.
+            radv=$(gh run view "$id" --json jobs \
+              --jq '.jobs[] | select(.name == "radv") | "\(.status)/\(.conclusion)"')
+            if [ "$radv" != "completed/success" ]; then
+              echo "::error::ci-deps-gpu run $id is $state and its radv job is ${radv:-absent}"
+              exit 1
+            fi
+            echo "run $id is $state but its radv job succeeded"
+          fi
+          sha=$(gh run view "$id" --json headSha --jq .headSha)
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "gpu run $id head $sha"
+
+      - name: Download radv-xclipse
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ steps.gpu.outputs.id }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist/icd
+          if ! gh run download "$RUN_ID" -n radv-xclipse -D dist/icd; then
+            echo "artifact radv-xclipse missing from run $RUN_ID"
+            gh api "repos/${{ github.repository }}/actions/runs/$RUN_ID/artifacts" \
+              --jq '.artifacts[].name' || true
+            exit 1
+          fi
+          find dist/icd -type f -printf '%p %s\n'
+
+      - name: Extract ICD
+        run: |
+          set -euo pipefail
+          so=$(find dist/icd -type f \( -name 'vulkan.radeon.so' -o -name 'libvulkan_radeon.so' \) | head -n1)
+          if [ -z "$so" ]; then
+            mkdir -p dist/icd-unpack
+            while IFS= read -r archive; do
+              case "$archive" in
+                *.tar.zst) tar --zstd -xf "$archive" -C dist/icd-unpack ;;
+                *.tar.gz|*.tgz) tar -xzf "$archive" -C dist/icd-unpack ;;
+                *.tar.xz) tar -xJf "$archive" -C dist/icd-unpack ;;
+                *.tar) tar -xf "$archive" -C dist/icd-unpack ;;
+              esac
+            done < <(find dist/icd -type f \( -name '*.tar.zst' -o -name '*.tar.gz' \
+              -o -name '*.tgz' -o -name '*.tar.xz' -o -name '*.tar' \))
+            so=$(find dist/icd-unpack -type f \( -name 'vulkan.radeon.so' -o -name 'libvulkan_radeon.so' \) | head -n1)
+          fi
+          if [ -z "$so" ]; then
+            echo "radv-xclipse artifact has no vulkan.radeon.so"
+            find dist/icd -type f -printf '%p\n'
+            exit 1
+          fi
+          cp "$so" dist/libvulkan_radeon.so
+          ls -l dist/libvulkan_radeon.so
+
+      - name: Check ICD
+        run: |
+          set -euo pipefail
+          BIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          "$BIN/llvm-readelf" -h dist/libvulkan_radeon.so > dist/libvulkan_radeon.elf.txt
+          grep -q 'AArch64' dist/libvulkan_radeon.elf.txt \
+            || { echo "ICD is not AArch64"; exit 1; }
+          "$BIN/llvm-readelf" --dyn-syms -W dist/libvulkan_radeon.so > dist/libvulkan_radeon.syms.txt
+          grep -q 'vk_icdGetInstanceProcAddr' dist/libvulkan_radeon.syms.txt \
+            || { echo "ICD does not export vk_icdGetInstanceProcAddr"; exit 1; }
+
+      - name: Package
+        env:
+          GPU_RUN_ID: ${{ steps.gpu.outputs.id }}
+          GPU_SHA: ${{ steps.gpu.outputs.sha }}
+        run: |
+          set -euo pipefail
+          cp tests/vk/run.sh dist/run.sh
+          chmod +x dist/run.sh dist/vk_probe
+          probe_sha=$(sha256sum dist/vk_probe | cut -d' ' -f1)
+          icd_sha=$(sha256sum dist/libvulkan_radeon.so | cut -d' ' -f1)
+          jq -n \
+            --arg probe_sha "$probe_sha" \
+            --arg icd_sha "$icd_sha" \
+            --arg gpu_run "$GPU_RUN_ID" \
+            --arg gpu_sha "$GPU_SHA" \
+            --arg commit "$GITHUB_SHA" \
+            --arg ndk "$NDK_VERSION" \
+            --arg built "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{probe:"vk_probe",probe_sha256:$probe_sha,icd:"libvulkan_radeon.so",
+              icd_sha256:$icd_sha,gpu_run_id:$gpu_run,gpu_head_sha:$gpu_sha,
+              commit:$commit,ndk:$ndk,built_utc:$built}' > dist/meta.json
+          cat dist/meta.json
+          tar -C dist -czf dist/titan-m3-probe.tar.gz \
+            vk_probe libvulkan_radeon.so meta.json run.sh
+          ls -l dist/titan-m3-probe.tar.gz
+          sha256sum dist/titan-m3-probe.tar.gz
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: titan-m3-probe
+          path: |
+            dist/titan-m3-probe.tar.gz
+            dist/meta.json
+          if-no-files-found: error
+          retention-days: 30
