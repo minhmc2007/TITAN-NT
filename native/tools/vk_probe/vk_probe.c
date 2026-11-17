@@ -39,6 +39,7 @@ static unsigned drm_facts;
 static struct {
     uint32_t vendor;
     uint32_t device;
+    int driver_id;
 } vk_ids[8];
 static unsigned vk_id_count;
 
@@ -245,6 +246,7 @@ static void probe_device(VkPhysicalDevice dev, uint32_t index) {
     if (vk_id_count < sizeof(vk_ids) / sizeof(vk_ids[0])) {
         vk_ids[vk_id_count].vendor = props.vendorID;
         vk_ids[vk_id_count].device = props.deviceID;
+        vk_ids[vk_id_count].driver_id = -1;
         vk_id_count++;
     }
 
@@ -417,6 +419,7 @@ static void probe_device(VkPhysicalDevice dev, uint32_t index) {
             res_fixed(key, drv.driverInfo, sizeof(drv.driverInfo));
             snprintf(key, sizeof(key), "device.%u.driver_id", index);
             res_fmt(key, "%d", (int)drv.driverID);
+            if (index < vk_id_count) vk_ids[index].driver_id = (int)drv.driverID;
             snprintf(key, sizeof(key), "device.%u.driver_properties", index);
             res_fmt(key, "1");
         } else {
@@ -518,7 +521,7 @@ static int read_drm_attr(const char *node, const char *attr, char *buf, size_t c
     return n > 0;
 }
 
-static void probe_drm_open(const char *node) {
+static void probe_drm_open(const char *node, char *driver, size_t driver_cap) {
     char path[64];
     char key[160];
     snprintf(path, sizeof(path), "/dev/dri/%s", node);
@@ -568,6 +571,7 @@ static void probe_drm_open(const char *node) {
     res_fmt(key, "%d.%d.%d", v.version_major, v.version_minor, v.version_patchlevel);
     snprintf(key, sizeof(key), "drm.%s.driver_name", node);
     res_fmt(key, "%s", name);
+    snprintf(driver, driver_cap, "%s", name);
     snprintf(key, sizeof(key), "drm.%s.driver_date", node);
     res_fmt(key, "%s", date);
     snprintf(key, sizeof(key), "drm.%s.driver_desc", node);
@@ -585,6 +589,10 @@ static void probe_drm_node(const char *node) {
     int have_device_id = read_drm_attr(node, "device", device, sizeof(device));
 
     char key[160];
+    char drm_driver[256] = {0};
+
+    probe_drm_open(node, drm_driver, sizeof(drm_driver));
+
     if (vk_id_count) {
         int match = 0;
         if (have_vendor_id && have_device_id) {
@@ -597,14 +605,23 @@ static void probe_drm_node(const char *node) {
                 }
             }
         }
+        /* Platform GPUs expose no PCI ids; RADV always sits on the amdgpu
+         * DRM driver, so the driver name is the identity that survives. */
+        if (!match && drm_driver[0]) {
+            for (unsigned i = 0; i < vk_id_count; i++) {
+                if (vk_ids[i].driver_id == VK_DRIVER_ID_MESA_RADV &&
+                    strcmp(drm_driver, "amdgpu") == 0) {
+                    match = 1;
+                    break;
+                }
+            }
+        }
         snprintf(key, sizeof(key), "drm.%s.matches_vk", node);
         res_fmt(key, "%d", match);
     } else {
         snprintf(key, sizeof(key), "drm.%s.matches_vk", node);
         res_fmt(key, "unknown");
     }
-
-    probe_drm_open(node);
 }
 
 static void probe_drm(void) {

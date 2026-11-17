@@ -11,8 +11,9 @@ for f in vk_probe libvulkan_radeon.so; do
 done
 
 cd "$DIR"
+# linker64 rejects relative program paths, and dlopen does not search the cwd.
 set +e
-/system/bin/linker64 ./vk_probe ./libvulkan_radeon.so > "$LOG" 2>&1
+/system/bin/linker64 "$DIR/vk_probe" "$DIR/libvulkan_radeon.so" > "$LOG" 2>&1
 rc=$?
 set -e
 cat "$LOG"
