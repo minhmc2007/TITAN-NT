@@ -51,12 +51,13 @@ for dll in "$STAGE"/*.dll; do
   "$BIN/arm64ec-w64-mingw32-strip" --strip-all "$dll"
 done
 
+# grep -q would close the pipe early and pipefail would fail the check.
 for dll in "$STAGE"/*.dll; do
   "$BIN/llvm-readobj" --file-headers "$dll" |
-    grep -Eq 'Machine: (IMAGE_FILE_MACHINE_ARM64EC|IMAGE_FILE_MACHINE_ARM64X)' || {
+    grep -E 'Machine: (IMAGE_FILE_MACHINE_ARM64EC|IMAGE_FILE_MACHINE_ARM64X)' > /dev/null || {
       echo "$dll is not ARM64EC/ARM64X"; exit 1;
     }
-  if "$BIN/llvm-readobj" --sections "$dll" | grep -q 'Name: \.debug_'; then
+  if "$BIN/llvm-readobj" --sections "$dll" | grep 'Name: \.debug_' > /dev/null; then
     echo "$dll still has debug sections"; exit 1
   fi
 done

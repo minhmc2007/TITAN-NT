@@ -25,7 +25,7 @@ if [ -z "$UNWIND" ]; then
            "$BIN/../sysroot/usr/lib/aarch64-linux-android/libc++abi.a" \
            "$BIN/../lib/clang"/*/lib/linux*/libunwind.a; do
     [ -f "$f" ] || continue
-    if "$BIN/llvm-nm" "$f" 2>/dev/null | grep -q 'unw_getcontext'; then
+    if "$BIN/llvm-nm" "$f" 2>/dev/null | grep 'unw_getcontext' > /dev/null; then
       UNWIND=$f
       break
     fi
@@ -33,7 +33,7 @@ if [ -z "$UNWIND" ]; then
 fi
 if [ -z "$UNWIND" ]; then
   while IFS= read -r f; do
-    if "$BIN/llvm-nm" "$f" 2>/dev/null | grep -q 'unw_getcontext'; then
+    if "$BIN/llvm-nm" "$f" 2>/dev/null | grep 'unw_getcontext' > /dev/null; then
       UNWIND=$f
       break
     fi
@@ -177,7 +177,7 @@ LIB="$STAGE/vulkan.radeon.so"
 grep -q 'AArch64' "$DIST/elf.txt" || {
   cat "$DIST/elf.txt"; exit 1;
 }
-if "$BIN/llvm-readelf" -S -W "$LIB" | grep -Eq '\.symtab|\.debug_'; then
+if "$BIN/llvm-readelf" -S -W "$LIB" | grep -E '\.symtab|\.debug_' > /dev/null; then
   echo "unstripped sections remain"; exit 1
 fi
 
