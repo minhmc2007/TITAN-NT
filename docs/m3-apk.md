@@ -131,12 +131,10 @@ from it even when no 32-bit application is launched. `share/` (11 MB) stays:
 
 ## Install and launch
 
-`app/titan-debug.jks` is committed so every CI build has one signature: Gradle's
-default debug key is generated per runner, and `adb install -r` rejects a build
-signed with a different key. It is a development key with the published
-password `titandebug`, used for nothing but this APK. A device that still holds
-a build from before the key was fixed needs one `adb uninstall dev.titan.nt`;
-after that, upgrades keep the signature.
+`app/titan-debug.jks` is committed so every CI build shares one signature;
+Gradle's default debug key is per runner, so `adb install -r` rejects the next
+build. Password `titandebug`, development key only. A device holding a build
+from before the fix needs one `adb uninstall dev.titan.nt`.
 
 ```sh
 adb install -r titan-m3.apk

@@ -70,8 +70,7 @@ jobs:
             test -n "$id" || { echo "no successful $workflow run" >&2; exit 1; }
             echo "$id"
           }
-          # ci-m3-inject.yml is not on the default branch yet, so --workflow
-          # cannot resolve it; match the run name instead.
+          # ci-m3-inject.yml is not on the default branch, so --workflow cannot find it
           resolve_inject() {
             local id=$1
             if [ -n "$id" ]; then

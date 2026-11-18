@@ -14,10 +14,7 @@ android {
         versionName '0.1'
     }
 
-    // A runner-generated debug key changes every build, so an install over an
-    // earlier build is rejected as a signature mismatch. The committed key is
-    // a development key with a published password; it signs nothing but this
-    // test APK.
+    // one fixed key: a per-runner debug key rejects install -r over the last build
     signingConfigs {
         debug {
             storeFile file('titan-debug.jks')
