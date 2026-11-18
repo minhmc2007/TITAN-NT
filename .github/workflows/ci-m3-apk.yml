@@ -176,8 +176,11 @@ jobs:
           unzip -q "$RUNNER_TEMP/gradle.zip" -d "$RUNNER_TEMP"
           "$RUNNER_TEMP/gradle-$GRADLE_VERSION/bin/gradle" \
             -p app --no-daemon --console=plain --stacktrace assembleDebug
+          find app/build/outputs/apk -type f -name '*.apk' -printf '%p %s bytes\n'
+          apk=$(find app/build/outputs/apk/debug -maxdepth 1 -type f -name '*.apk' | head -1)
+          test -n "$apk" || { echo "no debug APK produced" >&2; exit 1; }
           mkdir -p dist
-          cp app/build/outputs/apk/debug/app-debug.apk dist/titan-m3.apk
+          cp "$apk" dist/titan-m3.apk
 
       - name: Verify APK
         env:
