@@ -89,14 +89,16 @@ the file is writable without root.
 ## Build
 
 ```sh
-# push to m3/apk; workflow_dispatch 404s until the workflow is on main
+gh workflow run ci-m3-apk.yml --ref m3/apk \
+  -f cpu_run_id=<ci-deps-cpu run id> \
+  -f gpu_run_id=<ci-deps-gpu run id> \
+  -f inject_run_id=<ci-m3-inject run id>
 gh run watch
 gh run download <run id> -n titan-m3-apk
 ```
 
-The three dependency run ids are optional `workflow_dispatch` inputs
-(`cpu_run_id`, `gpu_run_id`, `inject_run_id`); each falls back to the newest
-successful run of its workflow.
+A push that touches `app/**` or the workflow also builds, with every run id
+resolved from the newest successful run of its workflow.
 
 The verified artifact is 216,682,696 bytes (207 MiB); `unzip -l` reports
 952,833,480 bytes uncompressed across 1671 entries, built by run 44311263044
