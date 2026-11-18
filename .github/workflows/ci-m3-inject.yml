@@ -1,0 +1,250 @@
+name: ci-m3-inject
+
+on:
+  push:
+    branches:
+      - main
+      - m3/vk-inject
+    paths:
+      - native/vk_inject/**
+      - native/tools/vk_inject_test/**
+      - tests/vk/inject_run.sh
+      - .github/workflows/ci-m3-inject.yml
+  workflow_dispatch:
+    inputs:
+      gpu_run_id:
+        description: ci-deps-gpu run id that produced the radv-xclipse artifact
+        required: false
+        default: ""
+
+concurrency:
+  group: ci-m3-inject-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  NDK_VERSION: 30.0.16248370
+
+jobs:
+  inject:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Locate NDK
+        run: |
+          set -euo pipefail
+          echo "NDK=/usr/local/lib/android/sdk/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+          test -x "/usr/local/lib/android/sdk/ndk/$NDK_VERSION/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" \
+            || { echo "NDK $NDK_VERSION missing from runner image"; exit 1; }
+
+      - name: Build shim and test
+        run: |
+          set -euo pipefail
+          mkdir -p build dist
+          BIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          cc="$BIN/aarch64-linux-android34-clang"
+          "$cc" -O2 -Wall -Wextra -Werror -fPIC -shared \
+            -ffixed-x18 -fno-sanitize=shadow-call-stack \
+            -march=armv8.2-a+lse \
+            -o build/libtitan_vk.so native/vk_inject/vk_inject.c -llog
+          "$cc" -O2 -Wall -Wextra -Werror -fPIE -pie \
+            -ffixed-x18 -fno-sanitize=shadow-call-stack \
+            -march=armv8.2-a+lse \
+            -Wl,--dynamic-linker=/system/bin/linker64 \
+            -o build/vk_inject_test native/tools/vk_inject_test/vk_inject_test.c -ldl
+          "$BIN/llvm-strip" --strip-unneeded -o dist/libtitan_vk.so build/libtitan_vk.so
+          cp build/vk_inject_test dist/vk_inject_test
+          ls -l dist/
+
+      - name: Check shim
+        run: |
+          set -euo pipefail
+          BIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          "$BIN/llvm-readelf" -h -dW dist/libtitan_vk.so > dist/libtitan_vk.dyn.txt
+          grep -q 'AArch64' dist/libtitan_vk.dyn.txt \
+            || { echo "libtitan_vk.so is not AArch64"; exit 1; }
+          needed=$("$BIN/llvm-readelf" -dW dist/libtitan_vk.so |
+            sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p' | tr '\n' ' ' | sed 's/ $//')
+          echo "NEEDED: $needed"
+          for lib in $needed; do
+            case "$lib" in
+              libdl.so|libm.so|libc.so|liblog.so) ;;
+              *) echo "unexpected NEEDED $lib"; exit 1 ;;
+            esac
+          done
+          case " $needed " in
+            *" liblog.so "*) ;;
+            *) echo "shim does not link liblog"; exit 1 ;;
+          esac
+          "$BIN/llvm-readelf" --dyn-syms -W dist/libtitan_vk.so > dist/libtitan_vk.syms.txt
+          for sym in vkGetInstanceProcAddr vkGetDeviceProcAddr vkEnumerateInstanceVersion \
+                     vkEnumerateInstanceExtensionProperties vkEnumerateInstanceLayerProperties \
+                     vkCreateInstance vkCreateAndroidSurfaceKHR titan_vk_inject_state; do
+            grep -qE "[[:space:]]$sym$" dist/libtitan_vk.syms.txt \
+              || { echo "shim does not export $sym"; exit 1; }
+          done
+          if grep -q 'vk_icdGetInstanceProcAddr' dist/libtitan_vk.syms.txt; then
+            echo "shim must not export vk_icdGetInstanceProcAddr"
+            exit 1
+          fi
+          "$BIN/llvm-objdump" -d --no-show-raw-insn dist/libtitan_vk.so > dist/libtitan_vk.x18.txt
+          if grep -nE '(^|[^[:alnum:]_.])[xw]18([^[:alnum:]_]|$)' dist/libtitan_vk.x18.txt; then
+            echo "shim .text references x18"
+            exit 1
+          fi
+          echo "shim .text has no x18 or w18 operand"
+
+      - name: Check test binary
+        run: |
+          set -euo pipefail
+          BIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          "$BIN/llvm-readelf" -h -l dist/vk_inject_test > dist/vk_inject_test.elf.txt
+          grep -q 'AArch64' dist/vk_inject_test.elf.txt \
+            || { echo "vk_inject_test is not AArch64"; exit 1; }
+          grep -q 'Type:.*DYN' dist/vk_inject_test.elf.txt \
+            || { echo "vk_inject_test is not a PIE"; exit 1; }
+          grep -q 'Requesting program interpreter: /system/bin/linker64' dist/vk_inject_test.elf.txt \
+            || { echo "vk_inject_test has no Android dynamic linker"; exit 1; }
+          "$BIN/llvm-readelf" -dW dist/vk_inject_test > dist/vk_inject_test.dyn.txt
+          if grep -q 'libvulkan' dist/vk_inject_test.dyn.txt; then
+            echo "vk_inject_test must not link libvulkan"
+            exit 1
+          fi
+
+      - name: Resolve ci-deps-gpu run
+        id: gpu
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GPU_RUN_ID: ${{ inputs.gpu_run_id }}
+        run: |
+          set -euo pipefail
+          if [ -n "$GPU_RUN_ID" ]; then
+            id=$GPU_RUN_ID
+          else
+            if ! id=$(gh run list --workflow ci-deps-gpu.yml --status success --limit 1 \
+                         --json databaseId --jq '.[0].databaseId // empty' 2>&1); then
+              echo "::error::ci-deps-gpu workflow lookup failed: $id"
+              exit 1
+            fi
+          fi
+          if [ -z "$id" ]; then
+            echo "::error::no successful ci-deps-gpu run; pass gpu_run_id once radv-xclipse exists"
+            exit 1
+          fi
+          state=$(gh run view "$id" --json status,conclusion --jq '"\(.status)/\(.conclusion)"')
+          if [ "$state" != "completed/success" ]; then
+            # Only radv matters here; a failed sibling job still ships its artifact.
+            radv=$(gh run view "$id" --json jobs \
+              --jq '.jobs[] | select(.name == "radv") | "\(.status)/\(.conclusion)"')
+            if [ "$radv" != "completed/success" ]; then
+              echo "::error::ci-deps-gpu run $id is $state and its radv job is ${radv:-absent}"
+              exit 1
+            fi
+            echo "run $id is $state but its radv job succeeded"
+          fi
+          sha=$(gh run view "$id" --json headSha --jq .headSha)
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "gpu run $id head $sha"
+
+      - name: Download radv-xclipse
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ steps.gpu.outputs.id }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist/icd
+          if ! gh run download "$RUN_ID" -n radv-xclipse -D dist/icd; then
+            echo "artifact radv-xclipse missing from run $RUN_ID"
+            gh api "repos/${{ github.repository }}/actions/runs/$RUN_ID/artifacts" \
+              --jq '.artifacts[].name' || true
+            exit 1
+          fi
+          find dist/icd -type f -printf '%p %s\n'
+
+      - name: Extract ICD
+        run: |
+          set -euo pipefail
+          so=$(find dist/icd -type f \( -name 'vulkan.radeon.so' -o -name 'libvulkan_radeon.so' \) | head -n1)
+          if [ -z "$so" ]; then
+            mkdir -p dist/icd-unpack
+            while IFS= read -r archive; do
+              case "$archive" in
+                *.tar.zst) tar --zstd -xf "$archive" -C dist/icd-unpack ;;
+                *.tar.gz|*.tgz) tar -xzf "$archive" -C dist/icd-unpack ;;
+                *.tar.xz) tar -xJf "$archive" -C dist/icd-unpack ;;
+                *.tar) tar -xf "$archive" -C dist/icd-unpack ;;
+              esac
+            done < <(find dist/icd -type f \( -name '*.tar.zst' -o -name '*.tar.gz' \
+              -o -name '*.tgz' -o -name '*.tar.xz' -o -name '*.tar' \))
+            so=$(find dist/icd-unpack -type f \( -name 'vulkan.radeon.so' -o -name 'libvulkan_radeon.so' \) | head -n1)
+          fi
+          if [ -z "$so" ]; then
+            echo "radv-xclipse artifact has no vulkan.radeon.so"
+            find dist/icd -type f -printf '%p\n'
+            exit 1
+          fi
+          cp "$so" dist/vulkan.radeon.so
+          ls -l dist/vulkan.radeon.so
+
+      - name: Check ICD
+        run: |
+          set -euo pipefail
+          BIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          "$BIN/llvm-readelf" -h dist/vulkan.radeon.so > dist/vulkan.radeon.elf.txt
+          grep -q 'AArch64' dist/vulkan.radeon.elf.txt \
+            || { echo "ICD is not AArch64"; exit 1; }
+          "$BIN/llvm-readelf" --dyn-syms -W dist/vulkan.radeon.so > dist/vulkan.radeon.syms.txt
+          grep -q 'vk_icdGetInstanceProcAddr' dist/vulkan.radeon.syms.txt \
+            || { echo "ICD does not export vk_icdGetInstanceProcAddr"; exit 1; }
+
+      - name: Package
+        env:
+          GPU_RUN_ID: ${{ steps.gpu.outputs.id }}
+          GPU_SHA: ${{ steps.gpu.outputs.sha }}
+        run: |
+          set -euo pipefail
+          cp tests/vk/inject_run.sh dist/run.sh
+          chmod +x dist/run.sh dist/vk_inject_test
+          needed=$("$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" -dW \
+            dist/libtitan_vk.so | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p' | tr '\n' ' ' |
+            sed 's/ $//')
+          shim_sha=$(sha256sum dist/libtitan_vk.so | cut -d' ' -f1)
+          test_sha=$(sha256sum dist/vk_inject_test | cut -d' ' -f1)
+          icd_sha=$(sha256sum dist/vulkan.radeon.so | cut -d' ' -f1)
+          jq -n \
+            --arg shim_sha "$shim_sha" \
+            --arg test_sha "$test_sha" \
+            --arg icd_sha "$icd_sha" \
+            --arg needed "$needed" \
+            --arg gpu_run "$GPU_RUN_ID" \
+            --arg gpu_sha "$GPU_SHA" \
+            --arg commit "$GITHUB_SHA" \
+            --arg ndk "$NDK_VERSION" \
+            --arg built "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{shim:"libtitan_vk.so",shim_sha256:$shim_sha,test:"vk_inject_test",
+              test_sha256:$test_sha,icd:"vulkan.radeon.so",icd_sha256:$icd_sha,
+              shim_needed:$needed,gpu_run_id:$gpu_run,gpu_head_sha:$gpu_sha,
+              commit:$commit,ndk:$ndk,built_utc:$built}' > dist/meta.json
+          cat dist/meta.json
+          tar -C dist -czf dist/titan-m3-inject.tar.gz \
+            libtitan_vk.so vk_inject_test vulkan.radeon.so run.sh meta.json
+          tar -tzf dist/titan-m3-inject.tar.gz
+          ls -l dist/titan-m3-inject.tar.gz
+          sha256sum dist/titan-m3-inject.tar.gz
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: titan-m3-inject
+          path: |
+            dist/titan-m3-inject.tar.gz
+            dist/meta.json
+            dist/libtitan_vk.dyn.txt
+            dist/libtitan_vk.x18.txt
+          if-no-files-found: error
+          retention-days: 30
