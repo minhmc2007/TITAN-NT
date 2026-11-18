@@ -9,7 +9,7 @@
 #include <dlfcn.h>
 #include <elf.h>
 #include <errno.h>
-#include <execinfo.h>
+#include <inttypes.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <link.h>
@@ -20,6 +20,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <unwind.h>
 #include <unistd.h>
 #include <vulkan/vulkan.h>
 
@@ -628,22 +629,45 @@ static int maps_contains(const char *needle)
     return found;
 }
 
+struct unwind_buffer {
+    uintptr_t pc[64];
+    int count;
+};
+
+static _Unwind_Reason_Code unwind_frame(struct _Unwind_Context *ctx, void *arg)
+{
+    struct unwind_buffer *buf = arg;
+    uintptr_t pc = (uintptr_t)_Unwind_GetIP(ctx);
+
+    if (pc != 0 && buf->count < (int)(sizeof(buf->pc) / sizeof(buf->pc[0])))
+        buf->pc[buf->count++] = pc;
+    return _URC_NO_REASON;
+}
+
 static void crash_handler(int sig, siginfo_t *info, void *ctx)
 {
-    void *frames[48];
-    int fd, count;
+    struct unwind_buffer buf = {{0}, 0};
+    char comm[32] = {0};
+    int fd, i;
 
     (void)info;
     (void)ctx;
     fd = open("/data/user/0/dev.titan.nt/files/crash.txt",
               O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
     if (fd >= 0) {
-        dprintf(fd, "signal %d tid %d\n", sig, gettid());
-        count = backtrace(frames, (int)(sizeof(frames) / sizeof(frames[0])));
-        backtrace_symbols_fd(frames, count, fd);
+        int comm_fd = open("/proc/self/comm", O_RDONLY | O_CLOEXEC);
+        if (comm_fd >= 0) {
+            (void)!read(comm_fd, comm, sizeof(comm) - 1);
+            close(comm_fd);
+        }
+        _Unwind_Backtrace(unwind_frame, &buf);
+        dprintf(fd, "signal %d tid %d comm %s\n", sig, gettid(), comm);
+        for (i = 0; i < buf.count; i++)
+            dprintf(fd, "#%02d %#" PRIxPTR "\n", i, buf.pc[i]);
         close(fd);
     }
-    _exit(70);
+    for (;;)
+        pause();
 }
 
 static void install_crash_trace(void)
