@@ -1,0 +1,51 @@
+name: ci-m3-d3d
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - tests/win/m3_d3d11_test.c
+      - .github/workflows/ci-m3-d3d.yml
+  workflow_dispatch:
+
+concurrency:
+  group: ci-m3-d3d-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  LLVM_MINGW: "20260721"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install llvm-mingw
+        run: |
+          set -euo pipefail
+          asset="llvm-mingw-$LLVM_MINGW-ucrt-ubuntu-22.04-x86_64"
+          curl -sSL -o /tmp/mingw.tar.xz \
+            "https://github.com/mstorsjo/llvm-mingw/releases/download/$LLVM_MINGW/$asset.tar.xz"
+          tar -C "$RUNNER_TEMP" -xf /tmp/mingw.tar.xz
+          mv "$RUNNER_TEMP/$asset" "$RUNNER_TEMP/llvm-mingw"
+          echo "MINGW=$RUNNER_TEMP/llvm-mingw/bin" >> "$GITHUB_ENV"
+
+      - name: Build
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          "$MINGW/x86_64-w64-mingw32-clang" -O2 -Wall -Wextra \
+            -o dist/m3_d3d11_test64.exe tests/win/m3_d3d11_test.c -ld3d11 -ldxgi
+          python3 -c 'import struct,sys; d=open(sys.argv[1],"rb").read(0x400); o=struct.unpack_from("<I",d,0x3c)[0]; print("machine", hex(struct.unpack_from("<H",d,o+4)[0]))' dist/m3_d3d11_test64.exe
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: m3-d3d
+          path: dist/m3_d3d11_test64.exe
+          if-no-files-found: error
+          retention-days: 30
