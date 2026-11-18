@@ -51,9 +51,12 @@ patches whichever ones exist.
 On the first entrypoint call, the shim:
 
 1. `dlopen`s `/system/lib64/libvulkan.so` with `RTLD_NOW | RTLD_LOCAL`.
-2. Finds the object through `dl_iterate_phdr`, walks `PT_DYNAMIC` for
-   `DT_STRTAB`, `DT_SYMTAB`, `DT_JMPREL`/`DT_PLTRELSZ` (and `DT_RELA` for
-   `-fno-plt` builds).
+2. Finds the object at the load address `dladdr` reports for
+   `vkGetInstanceProcAddr`, not by the `libvulkan.so` name: the shim is
+   installed under that same name, so a name match patches the shim's own GOT
+   whenever the shim is mapped before the platform loader. Then walks
+   `PT_DYNAMIC` for `DT_STRTAB`, `DT_SYMTAB`, `DT_JMPREL`/`DT_PLTRELSZ` (and
+   `DT_RELA` for `-fno-plt` builds).
 3. Rewrites every `R_AARCH64_JUMP_SLOT` (and `R_AARCH64_GLOB_DAT`) slot whose
    symbol is `android_load_sphal_library`, `android_unload_sphal_library`,
    `android_dlopen_ext` or `dlopen`. Whichever of the four the loader imports
@@ -89,10 +92,11 @@ The shim never makes Vulkan worse than stock:
   (`android_load_sphal_library`, `android_dlopen_ext` or `dlopen`). The stock
   vendor ICD loads and the driver works as before; only `device.0.name` stops
   containing `RADV`.
-- Platform loader missing, a real entrypoint unresolvable, or no matching
-  relocation: log the reason and leave the unresolvable slot alone; if no slot
-  at all is patched, forward every entrypoint unchanged. No partial install is
-  reported as success; `titan_vk_inject_state()` leaves the hook bit clear.
+- Platform loader missing, its load address unresolved, a real entrypoint
+  unresolvable, or no matching relocation: log the reason and leave the
+  unresolvable slot alone; if no slot at all is patched, forward every
+  entrypoint unchanged. No partial install is reported as success;
+  `titan_vk_inject_state()` leaves the hook bit clear.
 - `mprotect` failure is reported as a hook failure, not as a working
   substitution.
 

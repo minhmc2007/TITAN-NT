@@ -1,8 +1,5 @@
-/*
- * Loader-shaped shim for Wine: loads the platform libvulkan.so and redirects
- * the vendor-ICD open it performs to TITAN_ICD, so the stock Android WSI
- * (android surface + swapchain) drives radv.
- */
+/* Loader-shaped shim: wraps /system/lib64/libvulkan.so and redirects its
+ * vendor ICD open to TITAN_ICD, so the stock Android WSI drives radv. */
 #define _GNU_SOURCE
 #define VK_USE_PLATFORM_ANDROID_KHR
 #define VK_NO_PROTOTYPES
@@ -75,6 +72,7 @@ static const char *const g_hook_names[HOOK_COUNT] = {
 
 static struct loader_api g_api;
 static void *g_platform;
+static uintptr_t g_platform_base;
 static android_dlopen_ext_fn g_android_dlopen_ext;
 static android_load_sphal_library_fn g_load_sphal;
 static android_unload_sphal_library_fn g_unload_sphal;
@@ -94,18 +92,13 @@ static void *replace_android_dlopen_ext(const char *path, int flags,
                                         const android_dlextinfo *info);
 static void *replace_dlopen(const char *path, int flags);
 
+/* Match by address: the shim is also installed as libvulkan.so. */
 static int object_phdr(struct dl_phdr_info *info, size_t size, void *data)
 {
     struct loaded_object *obj = data;
-    const char *name = info->dlpi_name;
-    const char *base = NULL;
 
     (void)size;
-    if (name != NULL && name[0] != '\0') {
-        base = strrchr(name, '/');
-        base = base != NULL ? base + 1 : name;
-    }
-    if (base == NULL || strcmp(base, "libvulkan.so") != 0)
+    if (g_platform_base == 0 || (uintptr_t)info->dlpi_addr != g_platform_base)
         return 0;
 
     obj->phdr = info->dlpi_phdr;
@@ -144,8 +137,7 @@ static int object_in_relro(const struct loaded_object *obj, uintptr_t address)
     return 0;
 }
 
-/* Bionic keeps DT_* d_ptr values link-time relative, glibc relocates them in
- * place. Accept whichever form lands inside a PT_LOAD of this object. */
+/* Bionic keeps DT_* pointers link-time relative; accept either form. */
 static uintptr_t object_pointer(const struct loaded_object *obj, Elf64_Addr value)
 {
     uintptr_t relocated;
@@ -176,8 +168,7 @@ static int patch_slot(const struct loaded_object *obj, uintptr_t slot, void *val
 
     *(void *volatile *)slot = value;
 
-    /* RELRO pages were mapped read-only after relocation even though the
-     * containing PT_LOAD still carries PF_W. */
+    /* RELRO pages stay read-only even though the PT_LOAD has PF_W. */
     segment = object_segment(obj, slot);
     if (segment != NULL && (segment->p_flags & PF_W) != 0 &&
         !object_in_relro(obj, slot))
@@ -470,8 +461,7 @@ static void *open_icd(int hook, const char *path)
 
         __android_log_print(ANDROID_LOG_INFO, TAG, "%s: TITAN_ICD %s replaces %s",
                             g_hook_names[hook], icd, path);
-        /* The vendor namespace cannot see /data/app, so the ICD opens in the
-         * caller's namespace. */
+        /* the vendor namespace cannot see /data/app */
         handle = dlopen(icd, RTLD_NOW);
         if (handle != NULL) {
             track_handle(handle);
@@ -530,8 +520,7 @@ static int resolve_reals(void)
         __android_log_print(ANDROID_LOG_ERROR, TAG, "dlopen libdl.so failed: %s", dlerror());
         return -1;
     }
-    /* libvndksupport is a DT_NEEDED of the platform loader, so the handle
-     * search reaches the real sphal entrypoints. */
+    /* libvndksupport is DT_NEEDED, so the handle search reaches the real pair */
     g_load_sphal =
         (android_load_sphal_library_fn)dlsym(g_platform, "android_load_sphal_library");
     g_unload_sphal =
@@ -539,6 +528,21 @@ static int resolve_reals(void)
     g_android_dlopen_ext =
         (android_dlopen_ext_fn)dlsym(libdl, "android_dlopen_ext");
     g_dlopen = (dlopen_fn)dlsym(libdl, "dlopen");
+    return 0;
+}
+
+/* dladdr reports the same load address dl_iterate_phdr calls dlpi_addr. */
+static int resolve_platform_base(void)
+{
+    Dl_info info;
+
+    if (dladdr((void *)(uintptr_t)g_api.get_instance_proc_addr, &info) == 0 ||
+        info.dli_fbase == NULL) {
+        __android_log_print(ANDROID_LOG_ERROR, TAG, "cannot locate the load address of %s",
+                            PLATFORM_LOADER);
+        return -1;
+    }
+    g_platform_base = (uintptr_t)info.dli_fbase;
     return 0;
 }
 
@@ -580,9 +584,10 @@ static void init_once(void)
     if (resolve_reals() != 0)
         return;
 
-    /* The platform loader binds its ICD on the first API call; the slots have
-     * to be swapped before that, which is why every entrypoint lands here
-     * first. */
+    if (resolve_platform_base() != 0)
+        return;
+
+    /* the loader binds its ICD on the first API call, so patch first */
     if (install_hook() != 0)
         return;
     atomic_fetch_or_explicit(&g_state, STATE_HOOK_INSTALLED, memory_order_relaxed);
