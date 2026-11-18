@@ -72,6 +72,7 @@ provenance:
 | `0013-wineandroid-vulkan-surface` | TITAN | create the host Android surface from the registered client `ANativeWindow` |
 | `0014-wineandroid-native-window-ops` | TITAN | forward the dataspace/usage/refresh/timeout perform calls the loader's WSI makes |
 | `0015-win32u-titan-vulkan-lib` | TITAN | `TITAN_VULKAN_LIB` selects a custom-driver loader instead of the AOSP SONAME |
+| `0016-win32u-vulkan-init-reentry` | TITAN | the display-driver load inside `vulkan_init_once` enumerates Vulkan GPUs, which re-enters the same `pthread_once` and deadlocks |
 
 `dlls/wineandroid.drv` is compiled in the `ci-deps-cpu` wine job since Milestone 3. It is
 not a default display driver: `programs/explorer/desktop.c` keeps `mac,x11,wayland` as its

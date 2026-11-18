@@ -43,6 +43,27 @@ extension mapping. `p_map_device_extensions` must keep the
 `external_memory/semaphore/fence` win32 <-> fd mapping or DXVK and vkd3d cannot
 share resources.
 
+**The platform loader owns Android WSI.** A Khronos loader built at
+`vulkan-sdk-1.4.363.0` loads an ICD manifest and enumerates the radv device
+(222 device extensions, `docs/evidence/m3-vk-loader.log`), but exposes neither
+`VK_KHR_surface` nor `VK_KHR_android_surface`, and radv-xclipse has no swapchain
+backend to forward them to: `src/amd/vulkan/radv_wsi.h` defines
+`RADV_USE_WSI_PLATFORM` only for Wayland/XCB/Xlib/Display, and `radv_android.c`
+covers `ANDROID_native_buffer` alone. Android presentation lives in AOSP
+`libvulkan` (`vulkan/libvulkan/swapchain.cpp`) on top of that native-buffer
+extension, so the runtime loader is the platform `/system/lib64/libvulkan.so`
+with the vendor ICD redirected to our driver. Building a loader cannot supply
+`VK_KHR_swapchain` for an Android ICD.
+
+**Headless Vulkan deadlocks on a stale display cache.** `vulkan_init_once`
+resolves the driver funcs through `loaderdrv_VulkanInit`, which loads the
+display driver; a stale display cache makes that path call
+`d3dkmt_init_vulkan`, which calls `vulkan_instance_create`, which re-enters
+`__wine_get_vulkan_driver` on the same `pthread_once` and waits forever.
+`0016-win32u-vulkan-init-reentry` reports no driver while the once is running.
+Without a display driver every prefix is stale, so this hits the first Vulkan
+call in any console process.
+
 **The APK cannot load code from app data.** A modern `targetSdk` blocks
 `dlopen` and file-backed `PROT_EXEC` mappings outside `lib/<abi>/`. ELF
 libraries (Wine unix libs, ICD, loader) go in `lib/arm64-v8a/`; PE files stay in
@@ -53,5 +74,7 @@ patches from M2. Termux's `targetSdk` 28 hid this; the APK will not.
 
 - Which of `renderD128` and `renderD129` is the Xclipse 530; the probe prints
   the sysfs identity of both rather than guessing.
-- Whether Khronos' loader or a thin ICD shim is smaller to carry; both satisfy
-  `TITAN_VULKAN_LIB`, the loader has to be built for Android.
+- How the platform loader is made to open `vulkan.radeon.so` instead of
+  `/vendor/lib64/hw/vulkan.samsung.so`: a shipped PLT hook on `libvulkan`'s
+  `android_dlopen_ext` import, or a rebuilt AOSP `libvulkan` with an ICD
+  override. A loader we build cannot provide `VK_KHR_swapchain`.
