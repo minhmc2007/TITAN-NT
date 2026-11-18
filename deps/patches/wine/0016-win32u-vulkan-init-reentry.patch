@@ -1,0 +1,35 @@
+From: TITAN-NT <titan@localhost>
+Date: Wed, 18 Nov 2026 09:00:00 +0700
+Subject: [PATCH] win32u: Do not re-enter the Vulkan driver init.
+
+Resolving the driver funcs inside vulkan_init_once loads the display driver.
+Loading it refreshes the display cache, and a stale cache enumerates Vulkan
+GPUs through d3dkmt_init_vulkan, which calls vulkan_instance_create and so
+__wine_get_vulkan_driver again. That second call waits on the pthread_once
+already running on this thread, so no Vulkan app ever reaches vkCreateInstance.
+Report no driver while the once is in progress; the display cache then falls
+back to the non-Vulkan adapters.
+---
+diff --git a/dlls/win32u/vulkan.c b/dlls/win32u/vulkan.c
+--- a/dlls/win32u/vulkan.c
++++ b/dlls/win32u/vulkan.c
+@@ -4184,6 +4184,8 @@
+ const struct vulkan_funcs *__wine_get_vulkan_driver( UINT version )
+ {
+     static pthread_once_t init_once = PTHREAD_ONCE_INIT;
++    /* the display driver load inside the once enumerates Vulkan GPUs */
++    static __thread BOOL in_init;
+ 
+     if (version != WINE_VULKAN_DRIVER_VERSION)
+     {
+@@ -4191,7 +4193,10 @@
+         return NULL;
+     }
+ 
++    if (in_init) return NULL;
++    in_init = TRUE;
+     pthread_once( &init_once, vulkan_init_once );
++    in_init = FALSE;
+     if (!vulkan_handle) return NULL;
+     return &vulkan_funcs;
+ }

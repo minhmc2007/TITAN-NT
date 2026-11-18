@@ -1,0 +1,129 @@
+[Vulkan Loader] DRIVER:         Searching for driver manifest files
+[Vulkan Loader] DRIVER:            In following locations:
+[Vulkan Loader] DRIVER:               /data/data/com.termux/files/home/m3loader/vulkan.radeon.json
+[Vulkan Loader] DRIVER:            Found the following files:
+[Vulkan Loader] DRIVER:               /data/data/com.termux/files/home/m3loader/vulkan.radeon.json
+[Vulkan Loader] DRIVER:         Found ICD manifest file /data/data/com.termux/files/home/m3loader/vulkan.radeon.json, version 1.0.0
+[Vulkan Loader] DEBUG | DRIVER: Searching for ICD drivers named /data/data/com.termux/files/home/m3loader/vulkan.radeon.so
+[Vulkan Loader] DRIVER:         Searching for driver manifest files
+[Vulkan Loader] DRIVER:            In following locations:
+[Vulkan Loader] DRIVER:               /data/data/com.termux/files/home/m3loader/vulkan.radeon.json
+[Vulkan Loader] DRIVER:            Found the following files:
+[Vulkan Loader] DRIVER:               /data/data/com.termux/files/home/m3loader/vulkan.radeon.json
+[Vulkan Loader] DRIVER:         Found ICD manifest file /data/data/com.termux/files/home/m3loader/vulkan.radeon.json, version 1.0.0
+[Vulkan Loader] DEBUG | DRIVER: Searching for ICD drivers named /data/data/com.termux/files/home/m3loader/vulkan.radeon.so
+[Vulkan Loader] DRIVER:         Searching for driver manifest files
+[Vulkan Loader] DRIVER:            In following locations:
+[Vulkan Loader] DRIVER:               /data/data/com.termux/files/home/m3loader/vulkan.radeon.json
+[Vulkan Loader] DRIVER:            Found the following files:
+[Vulkan Loader] DRIVER:               /data/data/com.termux/files/home/m3loader/vulkan.radeon.json
+[Vulkan Loader] DRIVER:         Found ICD manifest file /data/data/com.termux/files/home/m3loader/vulkan.radeon.json, version 1.0.0
+[Vulkan Loader] DEBUG | DRIVER: Searching for ICD drivers named /data/data/com.termux/files/home/m3loader/vulkan.radeon.so
+[Vulkan Loader] DRIVER:         Searching for driver manifest files
+[Vulkan Loader] DRIVER:            In following locations:
+[Vulkan Loader] DRIVER:               /data/data/com.termux/files/home/m3loader/vulkan.radeon.json
+[Vulkan Loader] DRIVER:            Found the following files:
+[Vulkan Loader] DRIVER:               /data/data/com.termux/files/home/m3loader/vulkan.radeon.json
+[Vulkan Loader] DRIVER:         Found ICD manifest file /data/data/com.termux/files/home/m3loader/vulkan.radeon.json, version 1.0.0
+[Vulkan Loader] DEBUG | DRIVER: Searching for ICD drivers named /data/data/com.termux/files/home/m3loader/vulkan.radeon.so
+/usr/local/share/libdrm/amdgpu.ids: No such file or directory
+amdgpu: DRM version is 3.42.0 (< 3.59); continuing.
+/usr/local/share/libdrm/amdgpu.ids: No such file or directory
+RESULT loader.path=/data/data/com.termux/files/home/m3loader/libvulkan.so
+RESULT loader.dlopen=ok
+RESULT loader.gipa=ok
+RESULT loader.instance_version=1.4.363
+RESULT loader.instance_extensions=10
+RESULT loader.ext.VK_KHR_surface=0
+RESULT loader.ext.VK_KHR_android_surface=0
+RESULT loader.instance_result=0
+RESULT loader.instance=ok
+RESULT loader.instance_api=1.4
+RESULT loader.api=ok
+RESULT loader.enumerate_devices_result=0
+RESULT loader.physical_devices=1
+RESULT device.0.name=AMD Radeon Graphics (RADV TITAN)
+RESULT device.0.type=1
+RESULT device.0.type_name=integrated_gpu
+RESULT device.0.api_version=1.4.368
+RESULT device.0.api_version_raw=0x00404170
+RESULT device.0.driver_version=26.99.99
+RESULT device.0.driver_version_raw=0x06863063
+RESULT device.0.vendor_id=0x144d
+RESULT device.0.device_id=0x73a0
+RESULT device.0.features=ok
+RESULT device.0.queue_families_result=ok
+RESULT device.0.queue_families=3
+RESULT device.0.queue_family.0.flags=0xf
+RESULT device.0.queue_family.0.queue_count=1
+RESULT device.0.queue_family.0.graphics=1
+RESULT device.0.queue_family.0.compute=1
+RESULT device.0.queue_family.0.transfer=1
+RESULT device.0.queue_family.0.sparse_binding=1
+RESULT device.0.queue_family.0.timestamp_bits=64
+RESULT device.0.queue_family.0.min_transfer_granularity=1x1x1
+RESULT device.0.queue_family.1.flags=0xe
+RESULT device.0.queue_family.1.queue_count=3
+RESULT device.0.queue_family.1.graphics=0
+RESULT device.0.queue_family.1.compute=1
+RESULT device.0.queue_family.1.transfer=1
+RESULT device.0.queue_family.1.sparse_binding=1
+RESULT device.0.queue_family.1.timestamp_bits=64
+RESULT device.0.queue_family.1.min_transfer_granularity=1x1x1
+RESULT device.0.queue_family.2.flags=0x8
+RESULT device.0.queue_family.2.queue_count=1
+RESULT device.0.queue_family.2.graphics=0
+RESULT device.0.queue_family.2.compute=0
+RESULT device.0.queue_family.2.transfer=0
+RESULT device.0.queue_family.2.sparse_binding=1
+RESULT device.0.queue_family.2.timestamp_bits=0
+RESULT device.0.queue_family.2.min_transfer_granularity=1x1x1
+RESULT device.0.memory_properties=ok
+RESULT device.0.memory_heaps=2
+RESULT device.0.memory_types=9
+RESULT device.0.heap.0.size=5810323456
+RESULT device.0.heap.0.flags=0x1
+RESULT device.0.heap.0.device_local=1
+RESULT device.0.heap.1.size=67108864
+RESULT device.0.heap.1.flags=0x1
+RESULT device.0.heap.1.device_local=1
+RESULT device.0.memory_type.0.flags=0x7
+RESULT device.0.memory_type.0.heap=0
+RESULT device.0.memory_type.1.flags=0xf
+RESULT device.0.memory_type.1.heap=0
+RESULT device.0.memory_type.2.flags=0xf
+RESULT device.0.memory_type.2.heap=0
+RESULT device.0.memory_type.3.flags=0x1
+RESULT device.0.memory_type.3.heap=0
+RESULT device.0.memory_type.4.flags=0xc7
+RESULT device.0.memory_type.4.heap=0
+RESULT device.0.memory_type.5.flags=0xcf
+RESULT device.0.memory_type.5.heap=0
+RESULT device.0.memory_type.6.flags=0xc1
+RESULT device.0.memory_type.6.heap=0
+RESULT device.0.memory_type.7.flags=0x7
+RESULT device.0.memory_type.7.heap=1
+RESULT device.0.memory_type.8.flags=0x1
+RESULT device.0.memory_type.8.heap=1
+RESULT device.0.device_extensions_result=0
+RESULT device.0.device_extensions=222
+RESULT device.0.ext.memory_budget=1
+RESULT device.0.ext.pci_bus_info=1
+RESULT device.0.ext.driver_properties=1
+RESULT device.0.properties2=ok
+RESULT device.0.driver_name=radv
+RESULT device.0.driver_info=Mesa 27.0.0-devel (git-cc87fdf712)
+RESULT device.0.driver_id=3
+RESULT device.0.driver_properties=1
+RESULT device.0.pci.domain=29487
+RESULT device.0.pci.bus=103
+RESULT device.0.pci.device=112
+RESULT device.0.pci.function=117
+RESULT device.0.pci_bus_info=1
+RESULT device.0.memory_budget=ok
+RESULT device.0.heap.0.budget=2298134528
+RESULT device.0.heap.0.usage=0
+RESULT device.0.heap.1.budget=62914560
+RESULT device.0.heap.1.usage=0
+RESULT loader.failures=0
+RESULT loader.exit=0
