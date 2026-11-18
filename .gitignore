@@ -2,3 +2,8 @@ probe-out/
 dist/
 build*/
 .cache/
+app/build/
+app/.gradle/
+app/src/main/assets/wine/
+app/src/main/assets/files.sum
+app/src/main/assets/sums.sum
