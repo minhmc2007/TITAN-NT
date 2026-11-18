@@ -12,6 +12,9 @@
 #include <vulkan/vulkan.h>
 
 static unsigned (*shim_state)(void);
+static const char *(*shim_symbol)(void);
+static const char *(*shim_symbols)(void);
+static const char *(*shim_matched_path)(void);
 static int state_printed;
 
 static void fact(const char *key, const char *fmt, ...)
@@ -41,6 +44,12 @@ static void print_state(void)
     fact("inject.state", "0x%x", bits);
     fact("inject.hook", (bits & (1u << 1)) != 0 ? "ok" : "failed");
     fact("inject.substituted", (bits & (1u << 2)) != 0 ? "1" : "0");
+    if (shim_symbol != NULL)
+        fact("inject.hook_symbol", "%s", shim_symbol());
+    if (shim_symbols != NULL)
+        fact("inject.hook_symbols", "%s", shim_symbols());
+    if (shim_matched_path != NULL)
+        fact("inject.matched_path", "%s", shim_matched_path());
     state_printed = 1;
 }
 
@@ -115,6 +124,10 @@ int main(int argc, char **argv)
         shim, "vkEnumerateInstanceExtensionProperties");
     create_instance = (PFN_vkCreateInstance)dlsym(shim, "vkCreateInstance");
     shim_state = (unsigned (*)(void))dlsym(shim, "titan_vk_inject_state");
+    shim_symbol = (const char *(*)(void))dlsym(shim, "titan_vk_inject_symbol");
+    shim_symbols = (const char *(*)(void))dlsym(shim, "titan_vk_inject_symbols");
+    shim_matched_path =
+        (const char *(*)(void))dlsym(shim, "titan_vk_inject_matched_path");
     if (gipa == NULL || enum_instance_ext == NULL || create_instance == NULL) {
         fact("inject.error", "shim does not export the loader entrypoints");
         return 2;

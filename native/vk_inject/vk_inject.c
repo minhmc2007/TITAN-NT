@@ -1,7 +1,7 @@
 /*
  * Loader-shaped shim for Wine: loads the platform libvulkan.so and redirects
- * the single android_dlopen_ext call it makes for its vendor ICD to TITAN_ICD,
- * so the stock Android WSI (android surface + swapchain) drives radv.
+ * the vendor-ICD open it performs to TITAN_ICD, so the stock Android WSI
+ * (android surface + swapchain) drives radv.
  */
 #define _GNU_SOURCE
 #define VK_USE_PLATFORM_ANDROID_KHR
@@ -16,6 +16,7 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -24,8 +25,10 @@
 
 #define TAG "titan_vk"
 #define PLATFORM_LOADER "/system/lib64/libvulkan.so"
-#define VENDOR_ICD_PREFIX "/vendor/lib64/hw/vulkan."
+#define VENDOR_ICD_SONAME "vulkan."
 #define VENDOR_ICD_SUFFIX ".so"
+#define MAX_ICD_HANDLES 8
+#define MAX_MATCHED_PATH 256
 
 enum {
     STATE_PLATFORM_LOADER = 1u << 0,
@@ -34,7 +37,18 @@ enum {
     STATE_VENDOR_FALLBACK = 1u << 3,
 };
 
+enum hook_slot {
+    HOOK_LOAD_SPHAL,
+    HOOK_UNLOAD_SPHAL,
+    HOOK_ANDROID_DLOPEN_EXT,
+    HOOK_DLOPEN,
+    HOOK_COUNT,
+};
+
 typedef void *(*android_dlopen_ext_fn)(const char *, int, const android_dlextinfo *);
+typedef void *(*android_load_sphal_library_fn)(const char *, int);
+typedef int (*android_unload_sphal_library_fn)(void *);
+typedef void *(*dlopen_fn)(const char *, int);
 
 struct loader_api {
     PFN_vkGetInstanceProcAddr get_instance_proc_addr;
@@ -52,13 +66,33 @@ struct loaded_object {
     Elf64_Addr base;
 };
 
+static const char *const g_hook_names[HOOK_COUNT] = {
+    "android_load_sphal_library",
+    "android_unload_sphal_library",
+    "android_dlopen_ext",
+    "dlopen",
+};
+
 static struct loader_api g_api;
 static void *g_platform;
 static android_dlopen_ext_fn g_android_dlopen_ext;
+static android_load_sphal_library_fn g_load_sphal;
+static android_unload_sphal_library_fn g_unload_sphal;
+static dlopen_fn g_dlopen;
 static pthread_once_t g_once = PTHREAD_ONCE_INIT;
 static _Atomic unsigned g_state;
+static _Atomic int g_symbol_recorded;
+static _Atomic int g_path_recorded;
+static _Atomic(void *) g_icd_handles[MAX_ICD_HANDLES];
+static char g_hook_symbol[64];
+static char g_hook_symbols[128];
+static char g_matched_path[MAX_MATCHED_PATH];
 
-static void *substitute_dlopen(const char *path, int flags, const android_dlextinfo *info);
+static void *replace_load_sphal(const char *name, int flag);
+static int replace_unload_sphal(void *handle);
+static void *replace_android_dlopen_ext(const char *path, int flags,
+                                        const android_dlextinfo *info);
+static void *replace_dlopen(const char *path, int flags);
 
 static int object_phdr(struct dl_phdr_info *info, size_t size, void *data)
 {
@@ -153,6 +187,47 @@ static int patch_slot(const struct loaded_object *obj, uintptr_t slot, void *val
     return *(void *volatile *)slot == value ? 0 : -1;
 }
 
+static int hook_index(const char *name)
+{
+    for (int i = 0; i < HOOK_COUNT; i++) {
+        if (strcmp(name, g_hook_names[i]) == 0)
+            return i;
+    }
+    return -1;
+}
+
+static void *hook_target(int index)
+{
+    switch (index) {
+    case HOOK_LOAD_SPHAL:
+        return (void *)(uintptr_t)replace_load_sphal;
+    case HOOK_UNLOAD_SPHAL:
+        return (void *)(uintptr_t)replace_unload_sphal;
+    case HOOK_ANDROID_DLOPEN_EXT:
+        return (void *)(uintptr_t)replace_android_dlopen_ext;
+    case HOOK_DLOPEN:
+        return (void *)(uintptr_t)replace_dlopen;
+    default:
+        return NULL;
+    }
+}
+
+static int hook_resolved(int index)
+{
+    switch (index) {
+    case HOOK_LOAD_SPHAL:
+        return g_load_sphal != NULL;
+    case HOOK_UNLOAD_SPHAL:
+        return g_unload_sphal != NULL;
+    case HOOK_ANDROID_DLOPEN_EXT:
+        return g_android_dlopen_ext != NULL;
+    case HOOK_DLOPEN:
+        return g_dlopen != NULL;
+    default:
+        return 0;
+    }
+}
+
 static int patch_relocations(const struct loaded_object *obj, uintptr_t table, size_t size,
                              uintptr_t symtab, uintptr_t strtab, unsigned type,
                              unsigned *patched)
@@ -162,19 +237,47 @@ static int patch_relocations(const struct loaded_object *obj, uintptr_t table, s
         const Elf64_Rela *rel = (const Elf64_Rela *)(table + offset);
         const Elf64_Sym *sym;
         const char *name;
+        int index;
 
         if (ELF64_R_TYPE(rel->r_info) != type)
             continue;
         sym = (const Elf64_Sym *)(symtab + ELF64_R_SYM(rel->r_info) * sizeof(Elf64_Sym));
         name = (const char *)(strtab + sym->st_name);
-        if (strcmp(name, "android_dlopen_ext") != 0)
+        index = hook_index(name);
+        if (index < 0)
             continue;
-        if (patch_slot(obj, obj->base + rel->r_offset,
-                       (void *)(uintptr_t)substitute_dlopen) != 0)
+        if (!hook_resolved(index)) {
+            __android_log_print(ANDROID_LOG_WARN, TAG,
+                                "cannot resolve the real %s, slot left alone", name);
+            continue;
+        }
+        if (patch_slot(obj, obj->base + rel->r_offset, hook_target(index)) != 0) {
+            __android_log_print(ANDROID_LOG_ERROR, TAG, "cannot rewrite the %s slot", name);
             return -1;
-        (*patched)++;
+        }
+        *patched |= 1u << index;
     }
     return 0;
+}
+
+static void format_hook_symbols(unsigned patched)
+{
+    size_t used = 0;
+
+    g_hook_symbols[0] = '\0';
+    for (int i = 0; i < HOOK_COUNT; i++) {
+        int written;
+
+        if ((patched & (1u << i)) == 0)
+            continue;
+        written = snprintf(g_hook_symbols + used, sizeof(g_hook_symbols) - used, "%s%s",
+                           used != 0 ? "," : "", g_hook_names[i]);
+        if (written < 0)
+            break;
+        used += (size_t)written;
+        if (used >= sizeof(g_hook_symbols))
+            break;
+    }
 }
 
 static int install_hook(void)
@@ -250,81 +353,197 @@ static int install_hook(void)
 
     if (jmprel != 0 && pltrelsz != 0 && (pltrel == DT_RELA || pltrel == 0)) {
         if (patch_relocations(&obj, jmprel, pltrelsz, symtab, strtab,
-                              R_AARCH64_JUMP_SLOT, &patched) != 0) {
-            __android_log_print(ANDROID_LOG_ERROR, TAG,
-                                "cannot rewrite the android_dlopen_ext PLT slot");
+                              R_AARCH64_JUMP_SLOT, &patched) != 0)
             return -1;
-        }
     }
     if (rela != 0 && relasz != 0) {
         if (patch_relocations(&obj, rela, relasz, symtab, strtab,
-                              R_AARCH64_GLOB_DAT, &patched) != 0) {
-            __android_log_print(ANDROID_LOG_ERROR, TAG,
-                                "cannot rewrite the android_dlopen_ext GOT slot");
+                              R_AARCH64_GLOB_DAT, &patched) != 0)
             return -1;
-        }
     }
     if (patched == 0) {
         __android_log_print(ANDROID_LOG_ERROR, TAG,
-                            "%s has no android_dlopen_ext relocation", PLATFORM_LOADER);
+                            "%s imports none of android_load_sphal_library, "
+                            "android_unload_sphal_library, android_dlopen_ext, dlopen",
+                            PLATFORM_LOADER);
         return -1;
     }
-    __android_log_print(ANDROID_LOG_INFO, TAG, "hooked android_dlopen_ext in %s (%u slots)",
-                        PLATFORM_LOADER, patched);
+    format_hook_symbols(patched);
+    __android_log_print(ANDROID_LOG_INFO, TAG, "hooked %s in %s", g_hook_symbols,
+                        PLATFORM_LOADER);
     return 0;
 }
 
 static int is_vendor_icd(const char *path)
 {
-    const size_t prefix = sizeof(VENDOR_ICD_PREFIX) - 1;
-    const size_t suffix = sizeof(VENDOR_ICD_SUFFIX) - 1;
-    const char *name;
+    static const char *const dirs[] = {
+        "/vendor/lib64/hw/",
+        "/vendor/lib/hw/",
+    };
+    const char *name = NULL;
     size_t length;
+    const size_t suffix = sizeof(VENDOR_ICD_SUFFIX) - 1;
 
-    if (strncmp(path, VENDOR_ICD_PREFIX, prefix) != 0)
+    if (path == NULL)
         return 0;
-    name = path + prefix;
+    if (path[0] == '/') {
+        for (size_t i = 0; i < sizeof(dirs) / sizeof(dirs[0]); i++) {
+            const size_t dir = strlen(dirs[i]);
+
+            if (strncmp(path, dirs[i], dir) == 0) {
+                name = path + dir;
+                break;
+            }
+        }
+        if (name == NULL)
+            return 0;
+    } else {
+        if (strchr(path, '/') != NULL)
+            return 0;
+        name = path;
+    }
+    if (strncmp(name, VENDOR_ICD_SONAME, sizeof(VENDOR_ICD_SONAME) - 1) != 0)
+        return 0;
     length = strlen(name);
-    return length > suffix && strcmp(name + length - suffix, VENDOR_ICD_SUFFIX) == 0;
+    return length > suffix + sizeof(VENDOR_ICD_SONAME) - 1 &&
+           strcmp(name + length - suffix, VENDOR_ICD_SUFFIX) == 0;
 }
 
-static void *substitute_dlopen(const char *path, int flags, const android_dlextinfo *info)
+static void track_handle(void *handle)
 {
-    if (path != NULL && is_vendor_icd(path)) {
-        const char *icd = getenv("TITAN_ICD");
+    for (size_t i = 0; i < MAX_ICD_HANDLES; i++) {
+        void *expected = NULL;
 
-        if (icd == NULL || icd[0] == '\0') {
-            __android_log_print(ANDROID_LOG_WARN, TAG, "TITAN_ICD unset, opening %s", path);
-        } else if (icd[0] != '/') {
-            __android_log_print(ANDROID_LOG_WARN, TAG, "TITAN_ICD %s is not absolute, opening %s",
-                                icd, path);
-        } else if (access(icd, R_OK) != 0) {
-            __android_log_print(ANDROID_LOG_WARN, TAG, "TITAN_ICD %s unreadable (%s), opening %s",
-                                icd, strerror(errno), path);
-        } else {
-            void *handle;
-
-            __android_log_print(ANDROID_LOG_INFO, TAG, "TITAN_ICD %s replaces %s", icd, path);
-            /* The vendor namespace cannot see /data/app, so the ICD opens in
-             * the caller's namespace. */
-            handle = dlopen(icd, RTLD_NOW | RTLD_LOCAL);
-            if (handle != NULL) {
-                atomic_fetch_or_explicit(&g_state, STATE_ICD_SUBSTITUTED,
-                                         memory_order_relaxed);
-                return handle;
-            }
-            __android_log_print(ANDROID_LOG_WARN, TAG, "dlopen %s failed: %s", icd,
-                                dlerror());
-        }
-        atomic_fetch_or_explicit(&g_state, STATE_VENDOR_FALLBACK, memory_order_relaxed);
+        if (atomic_compare_exchange_strong_explicit(&g_icd_handles[i], &expected, handle,
+                                                    memory_order_acq_rel,
+                                                    memory_order_relaxed))
+            return;
     }
-    return g_android_dlopen_ext(path, flags, info);
+    __android_log_print(ANDROID_LOG_WARN, TAG, "ICD handle table full, %p will not unload",
+                        handle);
+}
+
+static int untrack_handle(void *handle)
+{
+    if (handle == NULL)
+        return 0;
+    for (size_t i = 0; i < MAX_ICD_HANDLES; i++) {
+        void *expected = handle;
+
+        if (atomic_compare_exchange_strong_explicit(&g_icd_handles[i], &expected, NULL,
+                                                    memory_order_acq_rel,
+                                                    memory_order_relaxed))
+            return 1;
+    }
+    return 0;
+}
+
+static void record_symbol(int index)
+{
+    if (atomic_exchange_explicit(&g_symbol_recorded, 1, memory_order_acq_rel) == 0)
+        snprintf(g_hook_symbol, sizeof(g_hook_symbol), "%s", g_hook_names[index]);
+}
+
+static void record_path(const char *path)
+{
+    if (atomic_exchange_explicit(&g_path_recorded, 1, memory_order_acq_rel) == 0)
+        snprintf(g_matched_path, sizeof(g_matched_path), "%s", path);
+}
+
+static void *open_icd(int hook, const char *path)
+{
+    const char *icd;
+
+    if (!is_vendor_icd(path))
+        return NULL;
+    icd = getenv("TITAN_ICD");
+    if (icd == NULL || icd[0] == '\0') {
+        __android_log_print(ANDROID_LOG_WARN, TAG, "TITAN_ICD unset, opening %s", path);
+    } else if (icd[0] != '/') {
+        __android_log_print(ANDROID_LOG_WARN, TAG, "TITAN_ICD %s is not absolute, opening %s",
+                            icd, path);
+    } else if (access(icd, R_OK) != 0) {
+        __android_log_print(ANDROID_LOG_WARN, TAG, "TITAN_ICD %s unreadable (%s), opening %s",
+                            icd, strerror(errno), path);
+    } else {
+        void *handle;
+
+        __android_log_print(ANDROID_LOG_INFO, TAG, "%s: TITAN_ICD %s replaces %s",
+                            g_hook_names[hook], icd, path);
+        /* The vendor namespace cannot see /data/app, so the ICD opens in the
+         * caller's namespace. */
+        handle = dlopen(icd, RTLD_NOW);
+        if (handle != NULL) {
+            track_handle(handle);
+            atomic_fetch_or_explicit(&g_state, STATE_ICD_SUBSTITUTED,
+                                     memory_order_relaxed);
+            record_symbol(hook);
+            record_path(path);
+            return handle;
+        }
+        __android_log_print(ANDROID_LOG_WARN, TAG, "dlopen %s failed: %s", icd, dlerror());
+    }
+    atomic_fetch_or_explicit(&g_state, STATE_VENDOR_FALLBACK, memory_order_relaxed);
+    return NULL;
+}
+
+static void *replace_load_sphal(const char *name, int flag)
+{
+    void *handle = open_icd(HOOK_LOAD_SPHAL, name);
+
+    if (handle != NULL)
+        return handle;
+    return g_load_sphal != NULL ? g_load_sphal(name, flag) : NULL;
+}
+
+static int replace_unload_sphal(void *handle)
+{
+    if (untrack_handle(handle))
+        return dlclose(handle);
+    return g_unload_sphal != NULL ? g_unload_sphal(handle) : -1;
+}
+
+static void *replace_android_dlopen_ext(const char *path, int flags,
+                                        const android_dlextinfo *info)
+{
+    void *handle = open_icd(HOOK_ANDROID_DLOPEN_EXT, path);
+
+    if (handle != NULL)
+        return handle;
+    return g_android_dlopen_ext != NULL ? g_android_dlopen_ext(path, flags, info) : NULL;
+}
+
+static void *replace_dlopen(const char *path, int flags)
+{
+    void *handle = open_icd(HOOK_DLOPEN, path);
+
+    if (handle != NULL)
+        return handle;
+    return g_dlopen != NULL ? g_dlopen(path, flags) : NULL;
+}
+
+static int resolve_reals(void)
+{
+    void *libdl = dlopen("libdl.so", RTLD_NOW | RTLD_LOCAL);
+
+    if (libdl == NULL) {
+        __android_log_print(ANDROID_LOG_ERROR, TAG, "dlopen libdl.so failed: %s", dlerror());
+        return -1;
+    }
+    /* libvndksupport is a DT_NEEDED of the platform loader, so the handle
+     * search reaches the real sphal entrypoints. */
+    g_load_sphal =
+        (android_load_sphal_library_fn)dlsym(g_platform, "android_load_sphal_library");
+    g_unload_sphal =
+        (android_unload_sphal_library_fn)dlsym(g_platform, "android_unload_sphal_library");
+    g_android_dlopen_ext =
+        (android_dlopen_ext_fn)dlsym(libdl, "android_dlopen_ext");
+    g_dlopen = (dlopen_fn)dlsym(libdl, "dlopen");
+    return 0;
 }
 
 static void init_once(void)
 {
-    void *libdl;
-
     g_platform = dlopen(PLATFORM_LOADER, RTLD_NOW | RTLD_LOCAL);
     if (g_platform == NULL) {
         __android_log_print(ANDROID_LOG_ERROR, TAG, "dlopen %s failed: %s", PLATFORM_LOADER,
@@ -358,18 +577,12 @@ static void init_once(void)
         return;
     }
 
-    libdl = dlopen("libdl.so", RTLD_NOW | RTLD_LOCAL);
-    if (libdl != NULL)
-        g_android_dlopen_ext =
-            (android_dlopen_ext_fn)dlsym(libdl, "android_dlopen_ext");
-    if (g_android_dlopen_ext == NULL) {
-        __android_log_print(ANDROID_LOG_ERROR, TAG,
-                            "cannot resolve android_dlopen_ext, ICD stays stock");
+    if (resolve_reals() != 0)
         return;
-    }
 
-    /* The platform loader binds its ICD on the first API call; the slot has to
-     * be swapped before that, which is why every entrypoint lands here first. */
+    /* The platform loader binds its ICD on the first API call; the slots have
+     * to be swapped before that, which is why every entrypoint lands here
+     * first. */
     if (install_hook() != 0)
         return;
     atomic_fetch_or_explicit(&g_state, STATE_HOOK_INSTALLED, memory_order_relaxed);
@@ -385,6 +598,24 @@ unsigned titan_vk_inject_state(void)
 {
     ensure_ready();
     return atomic_load_explicit(&g_state, memory_order_relaxed);
+}
+
+const char *titan_vk_inject_symbol(void)
+{
+    ensure_ready();
+    return g_hook_symbol;
+}
+
+const char *titan_vk_inject_symbols(void)
+{
+    ensure_ready();
+    return g_hook_symbols;
+}
+
+const char *titan_vk_inject_matched_path(void)
+{
+    ensure_ready();
+    return g_matched_path;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateInstanceVersion(uint32_t *pApiVersion)

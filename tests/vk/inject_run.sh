@@ -27,9 +27,18 @@ grep -q '^RESULT runner.exit=0$' "$LOG" || fail=1
 grep -q '^RESULT inject.dlopen=ok$' "$LOG" || fail=1
 grep -q '^RESULT inject.instance=ok$' "$LOG" || fail=1
 grep -q '^RESULT inject.error=none$' "$LOG" || fail=1
+grep -q '^RESULT inject.substituted=1$' "$LOG" || fail=1
+grep -qE '^RESULT inject.hook_symbol=(android_load_sphal_library|android_dlopen_ext|dlopen)$' \
+    "$LOG" || fail=1
+hook_symbols='android_load_sphal_library|android_unload_sphal_library|android_dlopen_ext|dlopen'
+grep -qE "^RESULT inject.hook_symbols=($hook_symbols)(,($hook_symbols))*$" \
+    "$LOG" || fail=1
+grep -qE '^RESULT inject.matched_path=((/vendor/lib64/hw/|/vendor/lib/hw/)?vulkan\..+\.so)$' \
+    "$LOG" || fail=1
 grep -qE '^RESULT inject.physical_devices=[1-9][0-9]*$' "$LOG" || fail=1
 grep -q '^RESULT device.0.name=.*RADV' "$LOG" || fail=1
-for ext in VK_KHR_surface VK_KHR_android_surface VK_KHR_swapchain; do
+grep -q '^RESULT inject.ext.VK_KHR_swapchain=1$' "$LOG" || fail=1
+for ext in VK_KHR_surface VK_KHR_android_surface; do
     if ! grep -q "^RESULT inject.ext.$ext=1$" "$LOG"; then
         echo "vk_inject_test: $ext missing"
         fail=1
