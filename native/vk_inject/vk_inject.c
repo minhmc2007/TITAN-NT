@@ -635,12 +635,10 @@ static void write_frame(int fd, uintptr_t frame)
     Dl_info info;
 
     if (dladdr((void *)frame, &info) != 0 && info.dli_fname != NULL)
-        dprintf(fd, "%#" PRIxPTR " %s+%#" PRIxPTR "
-", frame, info.dli_fname,
+        dprintf(fd, "%#" PRIxPTR " %s+%#" PRIxPTR "\n", frame, info.dli_fname,
                 frame - (uintptr_t)info.dli_fbase);
     else
-        dprintf(fd, "%#" PRIxPTR "
-", frame);
+        dprintf(fd, "%#" PRIxPTR "\n", frame);
 }
 
 static void crash_handler(int sig, siginfo_t *info, void *ctx)
@@ -660,8 +658,7 @@ static void crash_handler(int sig, siginfo_t *info, void *ctx)
             (void)!read(comm_fd, comm, sizeof(comm) - 1);
             close(comm_fd);
         }
-        dprintf(fd, "signal %d tid %d comm %s
-", sig, gettid(), comm);
+        dprintf(fd, "signal %d tid %d comm %s\n", sig, gettid(), comm);
         write_frame(fd, uc->uc_mcontext.pc);
         write_frame(fd, uc->uc_mcontext.regs[30]);
         for (i = 0; i < 32 && fp > sp && fp < sp + (8u << 20); i++) {
