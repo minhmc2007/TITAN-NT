@@ -3,7 +3,9 @@
 `app/` is a single-module Gradle project that packages the M3 Wine runtime and
 `wineandroid.drv` into a debug APK. It is Java only, has no AndroidX or Kotlin
 dependency, and is built only in CI (`ci-m3-apk.yml`). The asset tree is
-generated from published dependency artifacts and is never committed.
+generated from published dependency artifacts and is never committed. The
+launcher label is `TITAN NT`; the package id stays `dev.titan.nt` because
+`WineActivity`'s JNI contract and the app-data path both depend on it.
 
 ## Why `WineActivity` and `targetSdk 28`
 
@@ -39,6 +41,7 @@ app/src/main/assets/
     │   └── share/wine/            wine.inf, nls/, winmd/
     └── lib/titan/
         ├── vulkan.radeon.so       radv-xclipse ICD
+        ├── libvulkan.so           platform-loader injection shim
         └── meta.json
 ```
 
@@ -66,10 +69,16 @@ activity passes as `WINELOADER`.
 | `WINEDLLPATH` | `<filesDir>/wine/arm64-v8a/lib/wine` |
 | `LD_LIBRARY_PATH` | `<filesDir>/wine/arm64-v8a/lib:<nativeLibraryDir>` |
 | `TITAN_VULKAN_LIB` | `<filesDir>/wine/lib/titan/libvulkan.so`, only when that file exists |
+| `TITAN_ICD` | `<filesDir>/wine/lib/titan/vulkan.radeon.so`, only when that file exists |
 
-`TITAN_VULKAN_LIB` is unset until the loader workstream installs the shim.
-When unset, Wine resolves its built-in `SONAME_LIBVULKAN`, which is the
-platform `/system/lib64/libvulkan.so`; no `libvulkan.so` is bundled here.
+`wine/lib/titan/libvulkan.so` is the injection shim from `ci-m3-inject`
+(`native/vk_inject`). It loads the platform `/system/lib64/libvulkan.so` and
+redirects the one vendor-ICD open to `TITAN_ICD`, so the device loader's
+Android WSI (`VK_KHR_android_surface`, `VK_KHR_swapchain`) drives radv instead
+of the Samsung driver. The ICD path has to be absolute because the shim opens
+it with plain `dlopen` in the app namespace; the loader's `sphal` namespace
+cannot see app data. Both variables are set from files, never from
+`VK_ICD_FILENAMES` or `LD_PRELOAD`.
 
 The launched command is the fourth `explorer.exe /desktop=shell,,android`
 argument. It comes from the `cmdline` string extra on the launch intent, else
@@ -80,23 +89,27 @@ the file is writable without root.
 ## Build
 
 ```sh
-gh workflow run ci-m3-apk.yml --ref m3/apk \
-  -f cpu_run_id=<ci-deps-cpu run id> \
-  -f gpu_run_id=<ci-deps-gpu run id>
+# push to m3/apk; workflow_dispatch 404s until the workflow is on main
 gh run watch
 gh run download <run id> -n titan-m3-apk
 ```
+
+The three dependency run ids are optional `workflow_dispatch` inputs
+(`cpu_run_id`, `gpu_run_id`, `inject_run_id`); each falls back to the newest
+successful run of its workflow.
 
 The verified artifact is 216,682,696 bytes (207 MiB); `unzip -l` reports
 952,833,480 bytes uncompressed across 1671 entries, built by run 44311263044
 from `ci-deps-cpu` run 44055288694 and `ci-deps-gpu` run 44058448003.
 
-The job unpacks `wine-aarch64` and `fex-aarch64` from the CPU run and
-`radv-xclipse`, `dxvk-arm64ec` and `vkd3d-arm64x` from the GPU run, merges the
-FEX overlay the same way `ci-m2-win.yml` does, installs Gradle 8.7 and AGP
-8.5.2 (JDK 17, no Android Studio), builds `assembleDebug`, checks the required
-asset entries and `targetSdkVersion:'28'` with `aapt2`, then uploads
-`titan-m3.apk`.
+The job unpacks `wine-aarch64` and `fex-aarch64` from the CPU run,
+`radv-xclipse`, `dxvk-arm64ec` and `vkd3d-arm64x` from the GPU run and
+`titan-m3-inject` from the inject run, merges the FEX overlay the same way
+`ci-m2-win.yml` does, installs Gradle 8.7 and AGP 8.5.2 (JDK 17, no Android
+Studio), builds `assembleDebug`, checks the required asset entries and
+`targetSdkVersion:'28'` with `aapt2`, then uploads `titan-m3.apk`. The inject
+run resolves by run name because `ci-m3-inject.yml` is not on the default
+branch yet.
 
 ## Safe trims
 
@@ -132,6 +145,40 @@ The first start extracts roughly 1 GB into
 `files/prefix`; it needs that much free space and several minutes. A failed
 launch leaves the extraction progress dialog up, and the reason is in the
 `wine` logcat tag.
+
+## First device launch (Android 17, SM-A556E)
+
+Evidence: `docs/evidence/m3-apk-first-launch.log`.
+
+The Wine side starts: `ntdll.so` loads from app data through `linker64` (with
+the API 37 warning `Attempt to load writable file`), `start_server` spawns the
+server, `WineActivity` and the `Wine` progress dialog each draw a first frame
+with the Samsung Vulkan render engine, and `explorer.exe` begins its display
+init. Then the process aborts:
+
+```
+V XGL  : Entering: Create                                  (thread 5240, Wine)
+V XGL  : Samsung::Vulkan::OpenDevice                       (threads 5295, 5302)
+D dev.titan.nt: [set] Decode return value is -2            (thread 5235, HWUI render)
+F libc : FORTIFY: pthread_mutex_lock called on a destroyed mutex (0x729f37649c)
+```
+
+This build had no shim, so `TITAN_VULKAN_LIB` was unset and Wine's win32u
+display init enumerated GPUs through the platform loader, opening two more
+`vulkan.samsung.so` devices inside a process whose HWUI already owns one. The
+aborting thread is HWUI's render thread and the mutex is a bionic mutex, so the
+fault is in process-local state, not in Wine's PE side.
+
+Not root-caused. The tombstone is required before claiming a cause:
+
+```sh
+adb shell dumpsys dropbox --print data_app_native_crash
+adb logcat -b crash -d
+```
+
+The next launch uses the shim + radv (`TITAN_ICD`), which removes the
+second-client overlap on the vendor driver entirely: Wine's Vulkan calls then
+land on radv, and the Samsung driver keeps only HWUI as a client.
 
 ## Not verified in CI
 

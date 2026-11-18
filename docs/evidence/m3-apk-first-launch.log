@@ -1,0 +1,95 @@
+# titan-m3.apk, first launch on SM-A556E, Android 17
+# Transcript of `adb logcat -v time` as pasted by the user. Two InsetsState
+# payloads are elided; everything else is verbatim.
+
+1795009189.502 10739  5212  5212 I libc    : SetHeapTaggingLevel: tag level set to 0
+1795009189.511 10739  5212  5212 I Zygote  : Process 5212 created for dev.titan.nt
+1795009189.512 10739  5212  5212 I dev.titan.nt: Late-enabling -Xcheck:jni
+1795009189.574 10739  5212  5212 I dev.titan.nt: Using generational CollectorTypeCMC GC.
+1795009189.588 10739  5212  5212 D nativeloader: Load libframework-connectivity-tiramisu-jni.so using APEX ns com_android_tethering for caller /apex/com.android.tethering/javalib/framework-connectivity-t.jar: ok
+1795009189.711 10739  5212  5212 D ApplicationLoaders: Returning zygote-cached class loader: /system/framework/android.test.base.jar
+1795009189.714 10739  5212  5212 D nativeloader: Configuring clns-9 for other apk /data/app/~~056i-GTA_XyYN2eHG66MzQ==/dev.titan.nt-T9eeX6y_asgIYVe75Y5pPw==/base.apk. target_sdk_version=28, uses_libraries=, library_path=/data/app/~~056i-GTA_XyYN2eHG66MzQ==/dev.titan.nt-T9eeX6y_asgIYVe75Y5pPw==/lib/arm64, permitted_path=/data:/mnt/expand:/data/user/0/dev.titan.nt
+1795009189.741 10739  5212  5212 V GraphicsEnvironment: Currently set values for:
+1795009189.741 10739  5212  5212 V GraphicsEnvironment:   angle_gl_driver_selection_pkgs=[]
+1795009189.741 10739  5212  5212 V GraphicsEnvironment:   angle_gl_driver_selection_values=[]
+1795009189.741 10739  5212  5212 V GraphicsEnvironment: dev.titan.nt is not listed in per-application setting
+1795009189.741 10739  5212  5212 V GraphicsEnvironment: first_api_level (34) < 36; skipping config_angleAllowList for dev.titan.nt
+1795009189.742 10739  5212  5212 V GraphicsEnvironment: Neither updatable production driver nor prerelease driver is supported.
+1795009189.755 10739  5212  5212 D ActivityThread: dev.titan.nt will use render engine as VK
+1795009189.755 10739  5212  5212 D HWUI    : HWUI - treat SMPTE_170M as sRGB
+1795009189.757 10739  5212  5235 I DisplayManager: Choreographer implicitly registered for the refresh rate.
+1795009189.757 10739  5212  5235 D HWUI    : CacheManager constructor. deviceInfo=(1080, 1920)
+1795009189.758 10739  5212  5235 V XGL     : SUMD version compiled date     = 2026-08-27 18:02 - KST
+1795009189.758 10739  5212  5235 V XGL     : SUMD version info              = Driver version: 25.3.21, git hash: df95828232
+1795009189.758 10739  5212  5235 V XGL     : SUMD PAL backend               = SPAL
+1795009189.758 10739  5212  5235 V XGL     : Entering: Create
+1795009189.764 10739  5212  5235 V XGL     : TearDownDevices at Platform 0x7006a78cf8, Devices ()
+1795009189.766 10739  5212  5235 V XGL     : Init at Platform 0x7006a78cf8
+1795009189.767 10739  5212  5235 V XGL     : Exiting: Create
+1795009189.812 10739  5212  5240 W System  : Attempt to load writable file: /data/user/0/dev.titan.nt/files/wine/arm64-v8a/lib/wine/aarch64-unix/ntdll.so. This will throw on a future Android version. Current sdk version: 37
+1795009189.814 10739  5212  5240 D nativeloader: Load /data/user/0/dev.titan.nt/files/wine/arm64-v8a/lib/wine/aarch64-unix/ntdll.so using class loader ns clns-9 (caller=/data/app/~~056i-GTA_XyYN2eHG66MzQ==/dev.titan.nt-T9eeX6y_asgIYVe75Y5pPw==/base.apk!classes2.dex): ok
+1795009189.815 10739  5212  5212 I DecorView: setWindowBackground: isPopOver=false color=ffefeff1 d=android.graphics.drawable.ColorDrawable@cc6f2e3
+1795009189.836 10739  5212  5212 D HardwareRenderer: onDisplayChanged. displayId=0 current wxh=2340x1080 mLargest wxh=0x0
+1795009189.841 10739  5212  5244 I dev.titan.nt: [HIDL_FETCH_IMapper] android.hardware.graphics.mapper@4.0: Loaded Mapper successfully.
+1795009189.849 10739  5212  5212 I InsetsController: onStateChanged: host=dev.titan.nt/org.winehq.wine.WineActivity
+1795009189.852 10739  5212  5212 I VRI[WineActivity]@484d237: synced displayState. AttachInfo displayState=2
+1795009189.860 10739  5212  5212 I Dialog  : mIsDeviceDefault = false, mIsSamsungBasicInteraction = false, isMetaDataInActivity = false
+1795009189.925 10739  5248  5240 E libsigchain: Setting SIGSEGV to SIG_DFL
+1795009189.976 10739  5248  5240 E libsigchain:   #00 pc 00006790  /apex/com.android.art/lib64/libsigchain.so (LogStack()+208)
+1795009189.976 10739  5248  5240 E libsigchain:   #01 pc 000074fc  /apex/com.android.art/lib64/libsigchain.so (sigaction64+212)
+1795009189.976 10739  5248  5240 E libsigchain:   #02 pc 00093288  /apex/com.android.runtime/lib64/bionic/libc.so (ApplyAttrs(short, __posix_spawnattr* const*)+92)
+1795009189.976 10739  5248  5240 E libsigchain:   #03 pc 00092b98  /apex/com.android.runtime/lib64/bionic/libc.so (posix_spawn(...)+312)
+1795009189.976 10739  5248  5240 E libsigchain:   #04 pc 00046dfc  /data/user/0/dev.titan.nt/files/wine/arm64-v8a/lib/wine/aarch64-unix/ntdll.so (unix_spawn+216)
+1795009189.976 10739  5248  5240 E libsigchain:   #05 pc 0004c3c8  /data/user/0/dev.titan.nt/files/wine/arm64-v8a/lib/wine/aarch64-unix/ntdll.so (build_path_and_exec+164)
+1795009189.976 10739  5248  5240 E libsigchain:   #06 pc 000472a4  /data/user/0/dev.titan.nt/files/wine/arm64-v8a/lib/wine/aarch64-unix/ntdll.so (start_server+192)
+1795009189.976 10739  5248  5240 E libsigchain:   #07 pc 0005aafc  /data/user/0/dev.titan.nt/files/wine/arm64-v8a/lib/wine/aarch64-unix/ntdll.so (server_init_process+932)
+1795009189.976 10739  5248  5240 E libsigchain:   #08 pc 000499ec  /data/user/0/dev.titan.nt/files/wine/arm64-v8a/lib/wine/aarch64-unix/ntdll.so (start_main_thread+48)
+1795009189.976 10739  5248  5240 E libsigchain:   #09 pc 00048f08  /data/user/0/dev.titan.nt/files/wine/arm64-v8a/lib/wine/aarch64-unix/ntdll.so (wine_init_jni+796)
+1795009189.976 10739  5248  5240 E libsigchain:   #10 pc 00288270  /apex/com.android.art/lib64/libart.so (art_quick_generic_jni_trampoline+144)
+1795009189.976 10739  5248  5240 E libsigchain:   #13 pc 004a1b2c  /apex/com.android.art/lib64/libart.so (art::interpreter::ExecuteSwitchImplCpp<false>+684)
+1795009189.976 10739  5248  5240 E libsigchain:   #15 pc 00003d68  /data/app/~~056i-GTA_XyYN2eHG66MzQ==/dev.titan.nt-T9eeX6y_asgIYVe75Y5pPw==/base.apk (org.winehq.wine.WineActivity.runWine+0)
+1795009189.976 10739  5248  5240 E libsigchain:   #19 pc 0000398c  /data/app/~~056i-GTA_XyYN2eHG66MzQ==/dev.titan.nt-T9eeX6y_asgIYVe75Y5pPw==/base.apk (org.winehq.wine.WineActivity.loadWine+0)
+1795009189.976 10739  5248  5240 E libsigchain:   #27 pc 00001d40  /data/app/~~056i-GTA_XyYN2eHG66MzQ==/dev.titan.nt-T9eeX6y_asgIYVe75Y5pPw==/base.apk (org.winehq.wine.WineActivity$1.run+0)
+1795009189.976 10739  5248  5240 E libsigchain:   #30 pc 020053bc  /memfd:jit-cache (deleted) (java.lang.Thread.run+140)
+1795009189.976 10739  5248  5240 E libsigchain:   #35 pc 0008c71c  /apex/com.android.runtime/lib64/bionic/libc.so (__pthread_start(void*)+184)
+1795009189.985 10739  5212  5212 D ScrollView: initGoToTop
+1795009190.067 10739  5212  5212 W Settings: Setting show_button_background has moved from android.provider.Settings.System to android.provider.Settings.Global, returning read-only value.
+1795009190.073 10739  5212  5212 I WindowManager: WindowManagerGlobal#addView, ty=2, view=com.android.internal.policy.DecorView{9282a20 V.E...... R.....I. 0,0-0,0}[Wine], caller=android.app.Dialog.show:545 org.winehq.wine.WineActivity$2.run:192
+1795009190.082 10739  5212  5212 D InputTransport: Input channel constructed: '708d3e2', fd=130
+1795009190.084 10739  5212  5212 I InsetsController: onStateChanged: host=Wine, from=android.view.ViewRootImpl.onInsetsStateChanged:3319
+# [InsetsState payload elided, window insets for the Wine dialog]
+1795009190.085 10739  5212  5212 I VRI[Wine]@7afdfd9: synced displayState. AttachInfo displayState=2
+1795009190.098 10739  5212  5212 I Surface : Creating surface for consumer unnamed-5212-0 with slotExpansion=1 for 64 slots
+1795009190.099 10739  5212  5212 I BLASTBufferQueue_Java: new BLASTBufferQueue, mName= VRI[WineActivity]@484d237 mNativeObject= 0x6fe6a7fe80
+1795009190.101 10739  5212  5212 I VRI[WineActivity]@484d237: Relayout returned: old=(89,0,2340,1080) new=(89,0,2340,1080) relayoutAsync=false req=(2251,1080)0 dur=3 res=0x3 s={true 0x71a6a8acd0} ch=true seqId=1 syncSeqId=0
+1795009190.105 10739  5212  5212 D VRI[WineActivity]@484d237: mThreadedRenderer.initialize() mSurface={isValid=true 0x71a6a8acd0} hwInitialized=true
+1795009190.134 10739  5212  5235 I XGL     : vkCreatePipelineCache, handle: 0x7196badbd0, useInitialData: 0, cacheSize: 0, cacheEntryCount: 0
+1795009190.154 10739  5212  5235 I GSC     : SID[0] : 443b655481921556, Kind: 1, time : 18.452 ms
+1795009190.159 10739  5212  5235 I GSC     : SID[1] : 357a40c78949802d, Kind: 0, time : 4.924 ms
+1795009190.161 10739  5212  5235 I BLASTBufferQueue: [VRI[WineActivity]@484d237#0](f:0,a:0,s:0) onFrameAvailable the first frame is available
+1795009190.162 10739  5212  5235 I VRI[WineActivity]@484d237: Received frameCommittedCallback lastAttemptedDrawFrameNum=1 didProduceBuffer=true
+1795009190.175 10739  5212  5212 I HWUI    : Using FreeType backend (prop=Auto)
+1795009190.194 10739  5212  5212 I Surface : Creating surface for consumer unnamed-5212-1 with slotExpansion=1 for 64 slots
+1795009190.195 10739  5212  5212 I BLASTBufferQueue_Java: update, w= 1308 h= 499 mName = VRI[Wine]@7afdfd9 format= -3
+1795009190.197 10739  5212  5212 I VRI[Wine]@7afdfd9: Relayout returned: old=(89,84,2340,1038) new=(626,377,1802,744) relayoutAsync=false req=(1176,367)0 dur=9 res=0x3 s={true 0x71a6a95430} ch=true seqId=2 syncSeqId=0
+1795009190.199 10739  5212  5212 D VRI[Wine]@7afdfd9: mThreadedRenderer.initialize() mSurface={isValid=true 0x71a6a95430} hwInitialized=true
+1795009190.242 10739  5212  5235 I GSC     : SID[4] : 45b33485578b5a8c, Kind: 1, time : 4.142 ms
+1795009190.247 10739  5212  5235 I GSC     : SID[5] : 9cfba7513f5197f1, Kind: 0, time : 4.627 ms
+1795009190.264 10739  5212  5235 I GSC     : SID[8] : 31e3c979372101ba, Kind: 1, time : 3.103 ms
+1795009190.270 10739  5212  5235 I BLASTBufferQueue: [VRI[Wine]@7afdfd9#1](f:0,a:0,s:0) onFrameAvailable the first frame is available
+1795009190.271 10739  5212  5235 I VRI[Wine]@7afdfd9: Received frameCommittedCallback lastAttemptedDrawFrameNum=1 didProduceBuffer=true
+1795009190.425 10739  5212  5235 I VRI[WineActivity]@484d237: Received frameCommittedCallback lastAttemptedDrawFrameNum=3 didProduceBuffer=false
+1795009190.468 10739  5212  5212 D VRI[Wine]@7afdfd9: mThreadedRenderer.initializeIfNeeded()#2 mSurface={isValid=true 0x71a6a95430}
+1795009190.941 10739  5212  5222 I dev.titan.nt: Compiler allocated 5454KB to compile void android.view.ViewRootImpl.performTraversals(long)
+1795009190.993 10739  5212  5240 V XGL     : Entering: Create
+1795009190.993 10739  5212  5240 V XGL     : TearDownDevices at Platform 0x7006a86b38, Devices ()
+1795009190.995 10739  5212  5240 V XGL     : Init at Platform 0x7006a86b38
+1795009190.996 10739  5212  5240 V XGL     : Exiting: Create
+1795009191.420 10739  5295  5295 V XGL     : Samsung::Vulkan::OpenDevice
+1795009191.422 10739  5302  5302 V XGL     : Samsung::Vulkan::OpenDevice
+1795009191.423 10739  5295  5295 V XGL     : SUMD version info              = Driver version: 25.3.21, git hash: df95828232
+1795009191.431 10739  5295  5295 V XGL     : TearDownDevices at Platform 0xb4000072e1a3fdd8, Devices ()
+1795009191.433 10739  5295  5295 V XGL     : Init at Platform 0xb4000072e1a3fdd8
+1795009191.434 10739  5302  5302 V XGL     : Exiting: Create
+1795009191.494 10739  5212  5235 D dev.titan.nt: [set] Decode return value is -2
+1795009191.502 10739  5212  5235 F libc    : FORTIFY: pthread_mutex_lock called on a destroyed mutex (0x729f37649c)

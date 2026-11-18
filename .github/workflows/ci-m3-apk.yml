@@ -14,6 +14,10 @@ on:
       gpu_run_id:
         description: ci-deps-gpu run id that produced radv-xclipse, dxvk-arm64ec and vkd3d-arm64x
         required: true
+      inject_run_id:
+        description: ci-m3-inject run id that produced the libtitan_vk loader shim
+        required: false
+        default: ""
 
 concurrency:
   group: ci-m3-apk-${{ github.ref }}
@@ -52,6 +56,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           CPU_RUN_ID: ${{ inputs.cpu_run_id }}
           GPU_RUN_ID: ${{ inputs.gpu_run_id }}
+          INJECT_RUN_ID: ${{ inputs.inject_run_id }}
         run: |
           set -euo pipefail
           resolve() {
@@ -65,17 +70,34 @@ jobs:
             test -n "$id" || { echo "no successful $workflow run" >&2; exit 1; }
             echo "$id"
           }
+          # ci-m3-inject.yml is not on the default branch yet, so --workflow
+          # cannot resolve it; match the run name instead.
+          resolve_inject() {
+            local id=$1
+            if [ -n "$id" ]; then
+              echo "$id"
+              return
+            fi
+            id=$(gh run list --limit 50 --json databaseId,name,conclusion \
+                   --jq '[.[] | select(.name == "ci-m3-inject" and .conclusion == "success")][0].databaseId // empty' \
+                   -R "$GITHUB_REPOSITORY")
+            test -n "$id" || { echo "no successful ci-m3-inject run" >&2; exit 1; }
+            echo "$id"
+          }
           cpu=$(resolve ci-deps-cpu.yml "$CPU_RUN_ID")
           gpu=$(resolve ci-deps-gpu.yml "$GPU_RUN_ID")
+          inject=$(resolve_inject "$INJECT_RUN_ID")
           echo "cpu_run_id=$cpu" >> "$GITHUB_OUTPUT"
           echo "gpu_run_id=$gpu" >> "$GITHUB_OUTPUT"
-          echo "cpu=$cpu gpu=$gpu"
+          echo "inject_run_id=$inject" >> "$GITHUB_OUTPUT"
+          echo "cpu=$cpu gpu=$gpu inject=$inject"
 
       - name: Download deps
         env:
           GH_TOKEN: ${{ github.token }}
           CPU_RUN_ID: ${{ steps.deps.outputs.cpu_run_id }}
           GPU_RUN_ID: ${{ steps.deps.outputs.gpu_run_id }}
+          INJECT_RUN_ID: ${{ steps.deps.outputs.inject_run_id }}
         run: |
           set -euo pipefail
           mkdir -p dist
@@ -85,7 +107,19 @@ jobs:
           for n in radv-xclipse dxvk-arm64ec vkd3d-arm64x; do
             gh run download "$GPU_RUN_ID" -n "$n" -D dist -R "$GITHUB_REPOSITORY"
           done
+          gh run download "$INJECT_RUN_ID" -n titan-m3-inject -D dist/inject \
+            -R "$GITHUB_REPOSITORY"
           ls -l dist/
+
+      - name: Unpack the vulkan shim
+        run: |
+          set -euo pipefail
+          mkdir -p dist/inject-unpack
+          tar -xzf dist/inject/titan-m3-inject.tar.gz -C dist/inject-unpack
+          so=$(find dist/inject-unpack -type f -name 'libtitan_vk.so' | head -n1)
+          test -n "$so" || { echo "shim artifact has no libtitan_vk.so" >&2; exit 1; }
+          cp "$so" dist/libtitan_vk.so
+          ls -l dist/libtitan_vk.so
 
       - name: Assemble assets
         run: |
@@ -118,6 +152,7 @@ jobs:
 
           mkdir -p stage/wine/lib/titan
           cp stage/radv/vulkan.radeon.so stage/radv/meta.json stage/wine/lib/titan/
+          cp dist/libtitan_vk.so stage/wine/lib/titan/libvulkan.so
 
           mkdir -p "$A"
           cp -a stage/wine "$A/wine"
@@ -145,6 +180,7 @@ jobs:
             wine/$ABI/share/wine/wine.inf \
             wine/$ABI/share/wine/nls/l_intl.nls \
             wine/lib/titan/vulkan.radeon.so \
+            wine/lib/titan/libvulkan.so \
             wine/lib/titan/meta.json; do
             test -f "$A/$f" || { echo "missing asset: $f" >&2; exit 1; }
           done
@@ -204,6 +240,7 @@ jobs:
             assets/wine/$ABI/share/wine/wine.inf \
             assets/wine/$ABI/share/wine/nls/l_intl.nls \
             assets/wine/lib/titan/vulkan.radeon.so \
+            assets/wine/lib/titan/libvulkan.so \
             assets/wine/lib/titan/meta.json; do
             grep -qxF "$f" apk.list || { echo "APK missing $f" >&2; exit 1; }
           done
@@ -211,6 +248,7 @@ jobs:
           test -n "$aapt2" || { echo "aapt2 not found" >&2; exit 1; }
           "$aapt2" dump badging dist/titan-m3.apk > badging.txt
           grep -q "targetSdkVersion:'28'" badging.txt
+          grep -q "application-label:'TITAN NT'" badging.txt
           grep -q "name='org.winehq.wine.WineActivity'" badging.txt
           unzip -l dist/titan-m3.apk | tail -1
           stat -c '%n %s bytes' dist/titan-m3.apk

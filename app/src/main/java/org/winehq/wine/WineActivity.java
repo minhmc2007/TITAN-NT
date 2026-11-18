@@ -134,6 +134,11 @@ public class WineActivity extends Activity
         File titan_vulkan = new File( getFilesDir(), "wine/lib/titan/libvulkan.so" );
         if (titan_vulkan.isFile()) env.put( "TITAN_VULKAN_LIB", titan_vulkan.toString() );
 
+        /* the shim opens this ICD with plain dlopen; the platform loader's
+         * vendor namespace cannot see app data, so the path stays absolute */
+        File titan_icd = new File( getFilesDir(), "wine/lib/titan/vulkan.radeon.so" );
+        if (titan_icd.isFile()) env.put( "TITAN_ICD", titan_icd.toString() );
+
         if (cmdline == null)
         {
             if (new File( prefix, "drive_c/winestart.cmd" ).exists()) cmdline = "c:\\winestart.cmd";
