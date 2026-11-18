@@ -85,8 +85,9 @@ handles go to the real unload.
 
 ## UI process gate
 
-`vkCreateInstance` refuses to run when `libhwui.so` is already loaded, which
-means the process owns an Android render thread. There the platform loader was
+`vkCreateInstance` refuses to run in the process whose `/proc/self/maps` lists
+`libart.so`, i.e. the Android app process that owns the HWUI render thread
+(`RTLD_NOLOAD` lookup of `libhwui.so` does not see the preloaded library). There the platform loader was
 initialised by HWUI before the shim hooked anything, so its ICD stays the vendor
 one and a second client re-initialises the vendor driver's global state; HWUI's
 render thread then locks a destroyed mutex and the app aborts. Returning

@@ -73,6 +73,7 @@ static const char *const g_hook_names[HOOK_COUNT] = {
 static struct loader_api g_api;
 static void *g_platform;
 static uintptr_t g_platform_base;
+static int g_ui_process;
 static android_dlopen_ext_fn g_android_dlopen_ext;
 static android_load_sphal_library_fn g_load_sphal;
 static android_unload_sphal_library_fn g_unload_sphal;
@@ -91,6 +92,7 @@ static int replace_unload_sphal(void *handle);
 static void *replace_android_dlopen_ext(const char *path, int flags,
                                         const android_dlextinfo *info);
 static void *replace_dlopen(const char *path, int flags);
+static int hosts_hwui(void);
 
 /* Match by address: the shim is also installed as libvulkan.so. */
 static int object_phdr(struct dl_phdr_info *info, size_t size, void *data)
@@ -587,11 +589,14 @@ static void init_once(void)
     if (resolve_platform_base() != 0)
         return;
 
+    g_ui_process = hosts_hwui();
+
     /* the loader binds its ICD on the first API call, so patch first */
     if (install_hook() != 0)
         return;
     atomic_fetch_or_explicit(&g_state, STATE_HOOK_INSTALLED, memory_order_relaxed);
-    __android_log_print(ANDROID_LOG_INFO, TAG, "%s ready", PLATFORM_LOADER);
+    __android_log_print(ANDROID_LOG_INFO, TAG, "%s ready, ui_process=%d", PLATFORM_LOADER,
+                        g_ui_process);
 }
 
 static void ensure_ready(void)
@@ -599,16 +604,29 @@ static void ensure_ready(void)
     (void)pthread_once(&g_once, init_once);
 }
 
-/* a UI process's HWUI render thread uses the vendor driver, and a second
- * client there destroys its mutexes */
+static int maps_contains(const char *needle)
+{
+    FILE *maps = fopen("/proc/self/maps", "re");
+    char line[512];
+    int found = 0;
+
+    if (maps == NULL)
+        return 0;
+    while (fgets(line, sizeof(line), maps) != NULL) {
+        if (strstr(line, needle) != NULL) {
+            found = 1;
+            break;
+        }
+    }
+    fclose(maps);
+    return found;
+}
+
+/* HWUI in an Android UI process holds the vendor driver; a second client there
+ * destroys its mutexes. ART is mapped only in that process. */
 static int hosts_hwui(void)
 {
-    void *hwui = dlopen("libhwui.so", RTLD_NOW | RTLD_NOLOAD);
-
-    if (hwui == NULL)
-        return 0;
-    dlclose(hwui);
-    return 1;
+    return maps_contains("/libhwui.so") || maps_contains("/libart.so");
 }
 
 unsigned titan_vk_inject_state(void)
@@ -666,9 +684,9 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateInstance(const VkInstanceCreateInfo *pCre
                                                 VkInstance *pInstance)
 {
     ensure_ready();
-    if (hosts_hwui()) {
+    if (g_ui_process) {
         __android_log_print(ANDROID_LOG_WARN, TAG,
-                            "skipping Vulkan: HWUI already owns the vendor driver here");
+                            "no Vulkan here: the Android UI owns the vendor driver");
         if (pInstance != NULL)
             *pInstance = VK_NULL_HANDLE;
         return VK_ERROR_INCOMPATIBLE_DRIVER;
