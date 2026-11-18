@@ -599,6 +599,18 @@ static void ensure_ready(void)
     (void)pthread_once(&g_once, init_once);
 }
 
+/* a UI process's HWUI render thread uses the vendor driver, and a second
+ * client there destroys its mutexes */
+static int hosts_hwui(void)
+{
+    void *hwui = dlopen("libhwui.so", RTLD_NOW | RTLD_NOLOAD);
+
+    if (hwui == NULL)
+        return 0;
+    dlclose(hwui);
+    return 1;
+}
+
 unsigned titan_vk_inject_state(void)
 {
     ensure_ready();
@@ -654,6 +666,13 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateInstance(const VkInstanceCreateInfo *pCre
                                                 VkInstance *pInstance)
 {
     ensure_ready();
+    if (hosts_hwui()) {
+        __android_log_print(ANDROID_LOG_WARN, TAG,
+                            "skipping Vulkan: HWUI already owns the vendor driver here");
+        if (pInstance != NULL)
+            *pInstance = VK_NULL_HANDLE;
+        return VK_ERROR_INCOMPATIBLE_DRIVER;
+    }
     if (g_api.create_instance == NULL) {
         if (pInstance != NULL)
             *pInstance = VK_NULL_HANDLE;

@@ -83,6 +83,17 @@ including layers, goes to the real entrypoint with its original arguments.
 `android_unload_sphal_library` closes only handles the shim returned; all other
 handles go to the real unload.
 
+## UI process gate
+
+`vkCreateInstance` refuses to run when `libhwui.so` is already loaded, which
+means the process owns an Android render thread. There the platform loader was
+initialised by HWUI before the shim hooked anything, so its ICD stays the vendor
+one and a second client re-initialises the vendor driver's global state; HWUI's
+render thread then locks a destroyed mutex and the app aborts. Returning
+`VK_ERROR_INCOMPATIBLE_DRIVER` leaves Wine without Vulkan in that one process,
+which only loses win32u's adapter enumeration; the desktop and the program run in
+child processes, where no HWUI is loaded and radv substitutes normally.
+
 ## Fallback
 
 The shim never makes Vulkan worse than stock:
