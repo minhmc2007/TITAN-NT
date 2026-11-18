@@ -11,6 +11,8 @@ these commits, not from a branch head.
 | D3D11 | `doitsujin/dxvk` | `v3.1.1` | `b1a1c99ab52b687cf950d62c88bc2fa316b41663` | Zlib |
 | D3D12 | `HansKristian-Work/vkd3d-proton` | `v3.1` | `4522cc1a8b1347f1ab1b0f7b14a23ed9444d95d1` | LGPL-2.1 |
 | Allocator | `microsoft/mimalloc` | `v3.6.1` | `56dc5eb80145f9a3ba7ca23d47c6a248b9d8586c` | MIT |
+| Vulkan loader | `KhronosGroup/Vulkan-Loader` | `vulkan-sdk-1.4.363.0` | `fa218055ff4948b159f31d43f800c808a13d51df` | Apache-2.0 |
+| Vulkan headers | `KhronosGroup/Vulkan-Headers` | `vulkan-sdk-1.4.363.0` | `6802bb4733b63ed5efd3adb308a6c885ef180ea1` | Apache-2.0 |
 
 Re-verify with:
 
@@ -159,6 +161,62 @@ Wine build is needed in the job.
 
 All three jobs publish workflow artifacts only (`retention-days: 30`); nothing is
 attached to a GitHub Release.
+
+
+## Vulkan loader build (`ci-m3-loader.yml`)
+
+| Item | Version | Source |
+| --- | --- | --- |
+| Vulkan loader | `vulkan-sdk-1.4.363.0` | `KhronosGroup/Vulkan-Loader` |
+| Vulkan headers | `vulkan-sdk-1.4.363.0` | `KhronosGroup/Vulkan-Headers` |
+| Android NDK | `30.0.16248370` | preinstalled on `ubuntu-latest` |
+| Target | `aarch64-linux-android34` | same API as the radv package |
+
+Upstream `Vulkan-Loader` keeps the Android WSI implementation but
+`CMakeLists.txt` has rejected `ANDROID` since `2896ff0b6075`, so no released
+loader binary can be built for Android. `deps/patches/vulkan-loader/0001-cmake-android-wsi.patch`
+replaces the `FATAL_ERROR` with `BUILD_WSI_ANDROID_SUPPORT` (default `ON`) and
+defines `VK_USE_PLATFORM_ANDROID_KHR` on the `platform_wsi` interface target.
+That define is what exports `vkCreateAndroidSurfaceKHR` and puts
+`VK_KHR_surface`/`VK_KHR_android_surface` in the loader's known-extension
+filter. The loader does not add those extensions to the enumerated list by
+itself: `loader_get_icd_loader_instance_extensions()` merges the ICD's list and
+drops names outside `LOADER_INSTANCE_EXTENSIONS`, so the ICD still has to
+advertise a surface extension for it to reach the application.
+
+`deps/vulkan-loader.sh` configures the loader with the NDK toolchain,
+`ANDROID_STL=none`, release mode, tests off, and the TITAN code-generation flags
+`-ffixed-x18 -fno-sanitize=shadow-call-stack -march=armv8.2-a+lse`; the shared
+linker gets `-Wl,-z,max-page-size=16384`. It strips the result, scans the
+disassembly for `x18`/`w18`, checks the AArch64 ELF type and exported entry
+points, and fails on any `NEEDED` outside `libdl.so libm.so libc.so`. No
+vendor library is added to the loader.
+
+The workflow installs the pinned headers, applies the loader patch, builds
+`libvulkan.so`, builds `native/tools/vk_loader_test/vk_loader_test.c` without
+linking `libvulkan`, downloads the `radv-xclipse` artifact from `ci-deps-gpu`,
+and packages `titan-m3-loader.tar.gz` with `libvulkan.so`, `vk_loader_test`,
+`vulkan.radeon.so`, `run.sh` and `meta.json`. The ICD JSON is not packaged:
+`tests/vk/loader_run.sh` writes it next to the extracted files so
+`library_path` is an absolute on-device path.
+
+The on-device contract is:
+
+| Variable | Value |
+| --- | --- |
+| `TITAN_VULKAN_LIB` | absolute path to the shipped `libvulkan.so`; `win32u` refuses a relative value |
+| `VK_ICD_FILENAMES` | absolute path to the runtime-written ICD JSON |
+| `VK_DRIVER_FILES` | optional, takes precedence over `VK_ICD_FILENAMES` when both are set |
+| `LD_LIBRARY_PATH` | directory holding `libvulkan.so` and `vulkan.radeon.so` |
+| `VK_LOADER_DEBUG` | `error,warn,driver` in the test runner |
+
+`tests/vk/loader_run.sh` starts `vk_loader_test` through
+`/system/bin/linker64` with absolute paths, logs to `vk-loader.log`, and requires
+`loader.exit=0`, `loader.dlopen=ok`, `loader.instance=ok`, at least one physical
+device, a non-empty `device.0.name`, and no `loader.error`. The
+`loader.ext.VK_KHR_surface` and `loader.ext.VK_KHR_android_surface` facts are
+printed either way; `0` means the ICD did not advertise that surface extension
+and the Wine Android-WSI path still needs that gap closed.
 
 
 ## Fork policy
