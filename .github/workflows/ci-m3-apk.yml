@@ -247,6 +247,11 @@ jobs:
           aapt2=$(find "$ANDROID_HOME/build-tools" -name aapt2 -type f | sort -V | tail -1)
           test -n "$aapt2" || { echo "aapt2 not found" >&2; exit 1; }
           "$aapt2" dump badging dist/titan-m3.apk > badging.txt
+          apksigner=$(find "$ANDROID_HOME/build-tools" -name apksigner -type f | sort -V | tail -1)
+          test -n "$apksigner" || { echo "apksigner not found" >&2; exit 1; }
+          "$apksigner" verify --print-certs dist/titan-m3.apk > certs.txt
+          grep -q "certificate SHA-256 digest: 30f095ead57dca02a34f20cd8278bfaba204c3024562ce438d3d0537285650a9" certs.txt \
+            || { echo "APK is not signed with the titan debug key:"; cat certs.txt; exit 1; }
           grep -q "targetSdkVersion:'28'" badging.txt \
             || { echo "targetSdk is not 28:"; grep -a targetSdkVersion badging.txt; exit 1; }
           grep -q "application: label='TITAN NT'" badging.txt \
