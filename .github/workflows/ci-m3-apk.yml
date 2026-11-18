@@ -1,0 +1,221 @@
+name: ci-m3-apk
+
+on:
+  push:
+    branches: [ m3/apk ]
+    paths:
+      - app/**
+      - .github/workflows/ci-m3-apk.yml
+  workflow_dispatch:
+    inputs:
+      cpu_run_id:
+        description: ci-deps-cpu run id that produced wine-aarch64 and fex-aarch64
+        required: true
+      gpu_run_id:
+        description: ci-deps-gpu run id that produced radv-xclipse, dxvk-arm64ec and vkd3d-arm64x
+        required: true
+
+concurrency:
+  group: ci-m3-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  GRADLE_VERSION: "8.7"
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Free disk
+        run: |
+          set -euo pipefail
+          sudo rm -rf /usr/share/dotnet /usr/local/share/boost /opt/ghc \
+            /usr/local/lib/android/sdk/emulator /usr/local/lib/android/sdk/system-images
+          sudo apt-get clean
+          df -h / | tail -1
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Resolve dependency runs
+        id: deps
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CPU_RUN_ID: ${{ inputs.cpu_run_id }}
+          GPU_RUN_ID: ${{ inputs.gpu_run_id }}
+        run: |
+          set -euo pipefail
+          resolve() {
+            local workflow=$1 id=$2
+            if [ -n "$id" ]; then
+              echo "$id"
+              return
+            fi
+            id=$(gh run list --workflow "$workflow" --status success --limit 1 \
+                   --json databaseId --jq '.[0].databaseId // empty' -R "$GITHUB_REPOSITORY")
+            test -n "$id" || { echo "no successful $workflow run" >&2; exit 1; }
+            echo "$id"
+          }
+          cpu=$(resolve ci-deps-cpu.yml "$CPU_RUN_ID")
+          gpu=$(resolve ci-deps-gpu.yml "$GPU_RUN_ID")
+          echo "cpu_run_id=$cpu" >> "$GITHUB_OUTPUT"
+          echo "gpu_run_id=$gpu" >> "$GITHUB_OUTPUT"
+          echo "cpu=$cpu gpu=$gpu"
+
+      - name: Download deps
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CPU_RUN_ID: ${{ steps.deps.outputs.cpu_run_id }}
+          GPU_RUN_ID: ${{ steps.deps.outputs.gpu_run_id }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for n in wine-aarch64 fex-aarch64; do
+            gh run download "$CPU_RUN_ID" -n "$n" -D dist -R "$GITHUB_REPOSITORY"
+          done
+          for n in radv-xclipse dxvk-arm64ec vkd3d-arm64x; do
+            gh run download "$GPU_RUN_ID" -n "$n" -D dist -R "$GITHUB_REPOSITORY"
+          done
+          ls -l dist/
+
+      - name: Assemble assets
+        run: |
+          set -euo pipefail
+          ABI=arm64-v8a
+          A=app/src/main/assets
+          rm -rf "$A" stage
+          mkdir -p stage/wine/"$ABI" stage/fex stage/dxvk stage/vkd3d stage/radv
+          tar -C stage/wine/"$ABI" --zstd -xf dist/wine-aarch64.tar.zst
+          tar -C stage/fex --zstd -xf dist/fex-aarch64.tar.zst
+          tar -C stage/dxvk --zstd -xf dist/dxvk-arm64ec.tar.zst
+          tar -C stage/vkd3d --zstd -xf dist/vkd3d-arm64x.tar.zst
+          tar -C stage/radv --zstd -xf dist/radv-xclipse.tar.zst
+
+          W=stage/wine/$ABI
+          rm -rf "$W/include" "$W/share/doc"
+          find "$W" -name '*.a' -delete
+
+          # The install keeps the loader in lib/wine/<arch>-unix and leaves
+          # bin/ symlinks dangling; WineActivity's contract is bin/wine.
+          find "$W/bin" -maxdepth 1 -type l -delete
+          cp "$W/lib/wine/aarch64-unix/wine" "$W/bin/wine"
+
+          cp -a stage/fex/lib/wine/aarch64-windows/. "$W/lib/wine/aarch64-windows/"
+          cp -a stage/fex/lib/wine/aarch64-unix/. "$W/lib/wine/aarch64-unix/"
+
+          cp stage/dxvk/d3d11.dll stage/dxvk/dxgi.dll \
+             stage/vkd3d/d3d12.dll stage/vkd3d/d3d12core.dll \
+             "$W/lib/wine/aarch64-windows/"
+
+          mkdir -p stage/wine/lib/titan
+          cp stage/radv/vulkan.radeon.so stage/radv/meta.json stage/wine/lib/titan/
+
+          mkdir -p "$A"
+          cp -a stage/wine "$A/wine"
+
+          for f in \
+            wine/$ABI/bin/wine wine/$ABI/bin/wineserver \
+            wine/$ABI/lib/wine/aarch64-unix/ntdll.so \
+            wine/$ABI/lib/wine/aarch64-unix/win32u.so \
+            wine/$ABI/lib/wine/aarch64-unix/wineandroid.so \
+            wine/$ABI/lib/wine/aarch64-unix/winevulkan.so \
+            wine/$ABI/lib/wine/aarch64-unix/libarm64ecfex.so \
+            wine/$ABI/lib/wine/aarch64-unix/libwow64fex.so \
+            wine/$ABI/lib/wine/aarch64-windows/ntdll.dll \
+            wine/$ABI/lib/wine/aarch64-windows/kernelbase.dll \
+            wine/$ABI/lib/wine/aarch64-windows/explorer.exe \
+            wine/$ABI/lib/wine/aarch64-windows/wineandroid.drv \
+            wine/$ABI/lib/wine/aarch64-windows/winevulkan.dll \
+            wine/$ABI/lib/wine/aarch64-windows/libarm64ecfex.dll \
+            wine/$ABI/lib/wine/aarch64-windows/libwow64fex.dll \
+            wine/$ABI/lib/wine/aarch64-windows/d3d11.dll \
+            wine/$ABI/lib/wine/aarch64-windows/dxgi.dll \
+            wine/$ABI/lib/wine/aarch64-windows/d3d12.dll \
+            wine/$ABI/lib/wine/aarch64-windows/d3d12core.dll \
+            wine/$ABI/lib/wine/i386-windows/ntdll.dll \
+            wine/$ABI/share/wine/wine.inf \
+            wine/$ABI/share/wine/nls/l_intl.nls \
+            wine/lib/titan/vulkan.radeon.so \
+            wine/lib/titan/meta.json; do
+            test -f "$A/$f" || { echo "missing asset: $f" >&2; exit 1; }
+          done
+
+          cd "$A"
+          find . -type f -printf '%P\n' | LC_ALL=C sort | xargs sha256sum > "$RUNNER_TEMP/files.sum"
+          mv "$RUNNER_TEMP/files.sum" files.sum
+          sha256sum files.sum > sums.sum
+          cd -
+          du -sh "$A"
+          find "$A" -type f | wc -l
+
+      - name: Build APK
+        env:
+          ANDROID_HOME: /usr/local/lib/android/sdk
+        run: |
+          set -euo pipefail
+          sdkmanager=$(find "$ANDROID_HOME" -maxdepth 5 -name sdkmanager -type f | head -1)
+          if [ ! -d "$ANDROID_HOME/platforms/android-34" ]; then
+            test -n "$sdkmanager" || { echo "sdkmanager not found" >&2; exit 1; }
+            set +o pipefail
+            yes | "$sdkmanager" --sdk_root="$ANDROID_HOME" --licenses >/dev/null
+            set -o pipefail
+            "$sdkmanager" --sdk_root="$ANDROID_HOME" \
+              "platforms;android-34" "build-tools;34.0.0"
+          fi
+          curl -sSL --retry 3 -o "$RUNNER_TEMP/gradle.zip" \
+            "https://services.gradle.org/distributions/gradle-$GRADLE_VERSION-bin.zip"
+          unzip -q "$RUNNER_TEMP/gradle.zip" -d "$RUNNER_TEMP"
+          "$RUNNER_TEMP/gradle-$GRADLE_VERSION/bin/gradle" \
+            -p app --no-daemon --console=plain --stacktrace assembleDebug
+          mkdir -p dist
+          cp app/build/outputs/apk/debug/app-debug.apk dist/titan-m3.apk
+
+      - name: Verify APK
+        env:
+          ANDROID_HOME: /usr/local/lib/android/sdk
+        run: |
+          set -euo pipefail
+          unzip -Z1 dist/titan-m3.apk > apk.list
+          ABI=arm64-v8a
+          for f in \
+            assets/files.sum assets/sums.sum \
+            assets/wine/$ABI/bin/wine assets/wine/$ABI/bin/wineserver \
+            assets/wine/$ABI/lib/wine/aarch64-unix/ntdll.so \
+            assets/wine/$ABI/lib/wine/aarch64-unix/wineandroid.so \
+            assets/wine/$ABI/lib/wine/aarch64-unix/winevulkan.so \
+            assets/wine/$ABI/lib/wine/aarch64-windows/explorer.exe \
+            assets/wine/$ABI/lib/wine/aarch64-windows/wineandroid.drv \
+            assets/wine/$ABI/lib/wine/aarch64-windows/d3d11.dll \
+            assets/wine/$ABI/lib/wine/aarch64-windows/dxgi.dll \
+            assets/wine/$ABI/lib/wine/aarch64-windows/d3d12.dll \
+            assets/wine/$ABI/lib/wine/aarch64-windows/d3d12core.dll \
+            assets/wine/$ABI/share/wine/wine.inf \
+            assets/wine/$ABI/share/wine/nls/l_intl.nls \
+            assets/wine/lib/titan/vulkan.radeon.so \
+            assets/wine/lib/titan/meta.json; do
+            grep -qxF "$f" apk.list || { echo "APK missing $f" >&2; exit 1; }
+          done
+          aapt2=$(find "$ANDROID_HOME/build-tools" -name aapt2 -type f | sort -V | tail -1)
+          test -n "$aapt2" || { echo "aapt2 not found" >&2; exit 1; }
+          "$aapt2" dump badging dist/titan-m3.apk > badging.txt
+          grep -q "targetSdkVersion:'28'" badging.txt
+          grep -q "name='org.winehq.wine.WineActivity'" badging.txt
+          unzip -l dist/titan-m3.apk | tail -1
+          stat -c '%n %s bytes' dist/titan-m3.apk
+          sha256sum dist/titan-m3.apk
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: titan-m3-apk
+          path: dist/titan-m3.apk
+          if-no-files-found: error
+          retention-days: 30
