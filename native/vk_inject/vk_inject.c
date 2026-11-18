@@ -9,6 +9,9 @@
 #include <dlfcn.h>
 #include <elf.h>
 #include <errno.h>
+#include <execinfo.h>
+#include <fcntl.h>
+#include <signal.h>
 #include <link.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -93,6 +96,7 @@ static void *replace_android_dlopen_ext(const char *path, int flags,
                                         const android_dlextinfo *info);
 static void *replace_dlopen(const char *path, int flags);
 static int hosts_hwui(void);
+static void install_crash_trace(void);
 
 /* Match by address: the shim is also installed as libvulkan.so. */
 static int object_phdr(struct dl_phdr_info *info, size_t size, void *data)
@@ -590,6 +594,8 @@ static void init_once(void)
         return;
 
     g_ui_process = hosts_hwui();
+    if (g_ui_process)
+        install_crash_trace();
 
     /* the loader binds its ICD on the first API call, so patch first */
     if (install_hook() != 0)
@@ -620,6 +626,36 @@ static int maps_contains(const char *needle)
     }
     fclose(maps);
     return found;
+}
+
+static void crash_handler(int sig, siginfo_t *info, void *ctx)
+{
+    void *frames[48];
+    int fd, count;
+
+    (void)info;
+    (void)ctx;
+    fd = open("/data/user/0/dev.titan.nt/files/crash.txt",
+              O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    if (fd >= 0) {
+        dprintf(fd, "signal %d tid %d\n", sig, gettid());
+        count = backtrace(frames, (int)(sizeof(frames) / sizeof(frames[0])));
+        backtrace_symbols_fd(frames, count, fd);
+        close(fd);
+    }
+    _exit(70);
+}
+
+static void install_crash_trace(void)
+{
+    struct sigaction action;
+
+    memset(&action, 0, sizeof(action));
+    action.sa_sigaction = crash_handler;
+    action.sa_flags = SA_SIGINFO;
+    sigemptyset(&action.sa_mask);
+    sigaction(SIGABRT, &action, NULL);
+    sigaction(SIGILL, &action, NULL);
 }
 
 /* HWUI in an Android UI process holds the vendor driver; a second client there
