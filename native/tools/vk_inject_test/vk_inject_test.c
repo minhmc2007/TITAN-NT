@@ -78,7 +78,8 @@ int main(int argc, char **argv)
     uint32_t enabled_count = 0;
     uint32_t device_count = 0;
     VkPhysicalDevice *devices;
-    VkPhysicalDeviceProperties props;
+    VkPhysicalDeviceProperties2 props = {0};
+    VkPhysicalDeviceDriverProperties driver = {0};
     VkApplicationInfo app = {0};
     VkInstanceCreateInfo create_info = {0};
     VkInstance instance = VK_NULL_HANDLE;
@@ -86,7 +87,7 @@ int main(int argc, char **argv)
     PFN_vkEnumerateInstanceExtensionProperties enum_instance_ext;
     PFN_vkCreateInstance create_instance;
     PFN_vkEnumeratePhysicalDevices enum_devices;
-    PFN_vkGetPhysicalDeviceProperties get_props;
+    PFN_vkGetPhysicalDeviceProperties2 get_props2;
     PFN_vkEnumerateDeviceExtensionProperties enum_dev_ext;
     PFN_vkDestroyInstance destroy_instance;
     VkResult result;
@@ -158,12 +159,12 @@ int main(int argc, char **argv)
 
     enum_devices = (PFN_vkEnumeratePhysicalDevices)gipa(instance,
                                                          "vkEnumeratePhysicalDevices");
-    get_props = (PFN_vkGetPhysicalDeviceProperties)gipa(instance,
-                                                        "vkGetPhysicalDeviceProperties");
+    get_props2 = (PFN_vkGetPhysicalDeviceProperties2)gipa(
+        instance, "vkGetPhysicalDeviceProperties2");
     enum_dev_ext = (PFN_vkEnumerateDeviceExtensionProperties)gipa(
         instance, "vkEnumerateDeviceExtensionProperties");
     destroy_instance = (PFN_vkDestroyInstance)gipa(instance, "vkDestroyInstance");
-    if (enum_devices == NULL || get_props == NULL || enum_dev_ext == NULL)
+    if (enum_devices == NULL || get_props2 == NULL || enum_dev_ext == NULL)
         error_exit(5, "instance dispatch is incomplete");
     fact("inject.gipa", "ok");
 
@@ -180,15 +181,21 @@ int main(int argc, char **argv)
     if (result != VK_SUCCESS)
         error_exit(5, "vkEnumeratePhysicalDevices %d", result);
 
-    get_props(devices[0], &props);
-    if (props.deviceName[0] == '\0')
+    props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+    driver.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES;
+    props.pNext = &driver;
+    get_props2(devices[0], &props);
+    if (props.properties.deviceName[0] == '\0')
         error_exit(6, "physical device 0 has an empty name");
-    fact("device.0.name", "%s", props.deviceName);
-    fact("device.0.driver_info", "%s", props.driverInfo);
-    fact("device.0.api_version", "%u.%u.%u", VK_API_VERSION_MAJOR(props.apiVersion),
-         VK_API_VERSION_MINOR(props.apiVersion), VK_API_VERSION_PATCH(props.apiVersion));
-    fact("device.0.vendor_id", "0x%04x", props.vendorID);
-    fact("device.0.device_id", "0x%04x", props.deviceID);
+    fact("device.0.name", "%s", props.properties.deviceName);
+    fact("device.0.driver_name", "%s", driver.driverName);
+    fact("device.0.driver_info", "%s", driver.driverInfo);
+    fact("device.0.api_version", "%u.%u.%u",
+         VK_API_VERSION_MAJOR(props.properties.apiVersion),
+         VK_API_VERSION_MINOR(props.properties.apiVersion),
+         VK_API_VERSION_PATCH(props.properties.apiVersion));
+    fact("device.0.vendor_id", "0x%04x", props.properties.vendorID);
+    fact("device.0.device_id", "0x%04x", props.properties.deviceID);
 
     result = enum_dev_ext(devices[0], NULL, &dev_ext_count, NULL);
     if (result != VK_SUCCESS)
