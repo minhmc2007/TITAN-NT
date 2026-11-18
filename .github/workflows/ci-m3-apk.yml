@@ -250,7 +250,7 @@ jobs:
           grep -q "targetSdkVersion:'28'" badging.txt \
             || { echo "targetSdk is not 28:"; grep -a targetSdkVersion badging.txt; exit 1; }
           grep -q "application-label:'TITAN NT'" badging.txt \
-            || { echo "label is not TITAN NT:"; grep -a application-label badging.txt; exit 1; }
+            || { echo "label is not TITAN NT, badging was:"; cat badging.txt; exit 1; }
           grep -q "name='org.winehq.wine.WineActivity'" badging.txt \
             || { echo "activity is not WineActivity:"; grep -a "launchable-activity" badging.txt; exit 1; }
           unzip -l dist/titan-m3.apk | tail -1
