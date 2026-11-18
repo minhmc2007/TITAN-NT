@@ -6,7 +6,7 @@
 
     <application
         android:allowBackup="false"
-        android:label="TITAN M3">
+        android:label="TITAN NT">
 
         <activity
             android:name="org.winehq.wine.WineActivity"
