@@ -100,12 +100,12 @@ gh run download <run id> -n titan-m3-apk
 A push that touches `app/**` or the workflow also builds, with every run id
 resolved from the newest successful run of its workflow.
 
-The verified artifact is 216,699,156 bytes (207 MiB); `unzip -l` reports
-952,847,798 bytes uncompressed across 1672 entries, built by run 44324098185
-from `ci-deps-cpu` run 44312841276, `ci-deps-gpu` run 44312841287 and
-`ci-m3-inject` run 44320273116. The one entry over the first build is the
-13,848-byte loader shim at `wine/lib/titan/libvulkan.so`; the remaining 2,612
-bytes of the size delta are zip overhead.
+The verified artifact is 216,699,156 bytes (207 MiB), sha256
+`6c5ead0b7dcfabccade2a267c2b564c7119f83a3950cc89da83a85dfb205166e`; `unzip -l`
+reports 952,847,782 bytes uncompressed across 1672 entries, built by run
+44331230066 from `ci-deps-cpu` run 44312841276, `ci-deps-gpu` run 44312841287
+and `ci-m3-inject` run 44330513586. The shim at `wine/lib/titan/libvulkan.so` is
+13,832 bytes.
 
 The job unpacks `wine-aarch64` and `fex-aarch64` from the CPU run,
 `radv-xclipse`, `dxvk-arm64ec` and `vkd3d-arm64x` from the GPU run and
