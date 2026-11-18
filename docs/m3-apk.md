@@ -87,6 +87,10 @@ gh run watch
 gh run download <run id> -n titan-m3-apk
 ```
 
+The verified artifact is 216,682,696 bytes (207 MiB); `unzip -l` reports
+952,833,480 bytes uncompressed across 1671 entries, built by run 44311263044
+from `ci-deps-cpu` run 44055288694 and `ci-deps-gpu` run 44058448003.
+
 The job unpacks `wine-aarch64` and `fex-aarch64` from the CPU run and
 `radv-xclipse`, `dxvk-arm64ec` and `vkd3d-arm64x` from the GPU run, merges the
 FEX overlay the same way `ci-m2-win.yml` does, installs Gradle 8.7 and AGP
@@ -128,3 +132,17 @@ The first start extracts roughly 1 GB into
 `files/prefix`; it needs that much free space and several minutes. A failed
 launch leaves the extraction progress dialog up, and the reason is in the
 `wine` logcat tag.
+
+## Not verified in CI
+
+- `targetSdk 28` is what allows `dlopen` and file-backed exec from app data;
+  only a device run can confirm the A55's SELinux policy and the loader path
+  actually permit it.
+- `wineboot` creating the prefix and `explorer.exe /desktop=shell,,android`
+  attaching the desktop are runtime-only.
+- There is no Vulkan ICD in the path yet. With no `libvulkan.so` shim the
+  activity leaves `TITAN_VULKAN_LIB` unset, Wine uses the platform loader and
+  the Xclipse driver is not selected; D3D12/D3D11 can boot but will not get a
+  RADV device until the loader workstream installs
+  `wine/lib/titan/libvulkan.so`. The APK does not bundle a substitute.
+
