@@ -1,0 +1,24 @@
+From: TITAN-NT <titan@localhost>
+Date: Wed, 18 Nov 2026 00:00:00 +0700
+Subject: [PATCH] cmake: allow the Android WSI build.
+
+Upstream keeps the Android WSI implementation but 2896ff0b replaced the
+platform define with a fatal error. TITAN cannot use the AOSP loader because
+it has no ICD manifest override, so ship the Khronos loader and restore the
+define behind an explicit option.
+---
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -117,7 +117,10 @@ add_library(platform_wsi INTERFACE)
+ if(WIN32)
+     target_compile_definitions(platform_wsi INTERFACE VK_USE_PLATFORM_WIN32_KHR)
+ elseif(ANDROID)
+-    message(FATAL_ERROR "Android build not supported!")
++    option(BUILD_WSI_ANDROID_SUPPORT "Build Android WSI support" ON)
++    if(BUILD_WSI_ANDROID_SUPPORT)
++        target_compile_definitions(platform_wsi INTERFACE VK_USE_PLATFORM_ANDROID_KHR)
++    endif()
+ elseif(APPLE)
+     target_compile_definitions(platform_wsi INTERFACE VK_USE_PLATFORM_METAL_EXT)
+     if (IOS)
