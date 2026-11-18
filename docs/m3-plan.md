@@ -64,11 +64,11 @@ display driver; a stale display cache makes that path call
 Without a display driver every prefix is stale, so this hits the first Vulkan
 call in any console process.
 
-**The APK cannot load code from app data.** A modern `targetSdk` blocks
-`dlopen` and file-backed `PROT_EXEC` mappings outside `lib/<abi>/`. ELF
-libraries (Wine unix libs, ICD, loader) go in `lib/arm64-v8a/`; PE files stay in
-assets and are read by Wine's loader, which already carries the anon-remap
-patches from M2. Termux's `targetSdk` 28 hid this; the APK will not.
+**The APK must keep `targetSdk 28` for M3.** API 29+ puts the app in
+`untrusted_app`, which denies `dlopen` and file-backed `PROT_EXEC` mappings
+under app data; Wine's unix libraries and PE files live there, and Termux runs
+for the same reason. A shipping APK would move every ELF into `lib/<abi>/` and
+replace the file-backed PE mapping path, which the M3 test APK does not do.
 
 ## Open
 
