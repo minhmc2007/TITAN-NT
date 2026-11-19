@@ -1,0 +1,28 @@
+# /data/user/0/dev.titan.nt/files/crash.txt, written by the shim's SIGABRT
+# handler (native/vk_inject), plus symbols from the libraries' .gnu_debugdata.
+# Device: SM-A556E, CP2A.260605.016/A556EXXUIEZJ1, kernel 6.1.162-android14-11.
+# Every launch on 2026-11-18/19 ended with this abort ~0.1-1 s after Wine's
+# first Vulkan call.
+
+signal 6 tid 6292 comm dev.titan.nt
+
+# crash pc, then the frame chain (return addresses, -4)
+0x728e3564c0 /apex/com.android.runtime/lib64/bionic/libc.so+0x7e4c0   async_safe_fatal
+0x728e35649c /apex/com.android.runtime/lib64/bionic/libc.so+0x7e49c   fortify check in __pthread_mutex_lock
+0x728e365e58 /apex/com.android.runtime/lib64/bionic/libc.so+0x8de58   pthread_mutex_lock
+0x728e365cb8 /apex/com.android.runtime/lib64/bionic/libc.so+0x8dcb8   pthread_mutex_lock
+0x726a97f1c0 /system/lib64/libc++.so+0xb21c0                          std::__1::mutex::lock
+0x729ecee110 /system/lib64/libhwui.so+0x77c110  android::uirenderer::skiapipeline::SkiaVulkanPipeline::draw(..., std::__1::mutex&)
+0x729ea94fa0 /system/lib64/libhwui.so+0x522fa0  android::uirenderer::renderthread::CanvasContext::draw(bool)
+0x729ea9bbac /system/lib64/libhwui.so+0x529bac  android::uirenderer::renderthread::CanvasContext::prepareAndDraw(RenderNode*)
+0x729ee8f130 /system/lib64/libhwui.so+0x91d130  RenderThread::frameCallback std::__1::__function::__func
+0x729ec1a064 /system/lib64/libhwui.so+0x6a8064  android::uirenderer::renderthread::RenderThread::threadLoop()
+0x72a6923080 /system/lib64/libutils.so+0x19080  libutil_thread_trampoline
+0x72a6925520 /system/lib64/libutils.so+0x1b520  libutil_thread_trampoline
+0x728e36471c /apex/com.android.runtime/lib64/bionic/libc.so+0x8c71c   __start_thread
+0x728e355d20 /apex/com.android.runtime/lib64/bionic/libc.so+0x7dd20   __pthread_start
+
+# Same mutex address (0x729f37649c, 0x729f379020 after a reboot) across every
+# launch, so it lives in a static object of a zygote-preloaded library, not in
+# a heap allocation. HWUI's render thread locks it during a normal frame draw
+# and bionic sees the pthread_mutex_destroy sentinel.
