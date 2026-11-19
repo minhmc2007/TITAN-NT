@@ -627,8 +627,10 @@ static void probe_ntdll(void)
     __android_log_print(ANDROID_LOG_INFO, TAG, "probe absolute %p %s", handle,
                         handle ? "ok" : dlerror());
     if (handle)
-        __android_log_print(ANDROID_LOG_INFO, TAG, "probe java_vm %p java_object %p",
-                            dlsym(handle, "java_vm"), dlsym(handle, "java_object"));
+        __android_log_print(ANDROID_LOG_INFO, TAG,
+                            "probe java_vm %p java_object %p JNI_OnLoad %p wine_init_jni %p",
+                            dlsym(handle, "java_vm"), dlsym(handle, "java_object"),
+                            dlsym(handle, "JNI_OnLoad"), dlsym(handle, "wine_init_jni"));
 }
 
 static void ensure_ready(void)
