@@ -770,6 +770,11 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance instan
     ensure_ready();
     if (g_api.get_instance_proc_addr == NULL || pName == NULL)
         return NULL;
+    /* winevulkan asks for vkCreateInstance through this entry, so the gate
+     * above is bypassed unless the lookup returns the gated function */
+    if (g_ui_process && instance == VK_NULL_HANDLE &&
+        strcmp(pName, "vkCreateInstance") == 0)
+        return (PFN_vkVoidFunction)vkCreateInstance;
     return g_api.get_instance_proc_addr(instance, pName);
 }
 
