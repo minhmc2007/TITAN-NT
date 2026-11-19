@@ -1,0 +1,32 @@
+From: TITAN-NT <titan@localhost>
+Date: Wed, 19 Nov 2026 17:00:00 +0700
+Subject: [PATCH] wineandroid: Create the event queue before the desktop waits.
+
+A virtual desktop goes through pCreateDesktop before its window exists, so
+init_event_queue() had not run: the debug assert fired and the polling fd was
+uninitialized. Initialize the queue on that path and keep the window path from
+replacing it.
+---
+diff --git a/dlls/wineandroid.drv/window.c b/dlls/wineandroid.drv/window.c
+index 1dca70a..b81093f 100644
+--- a/dlls/wineandroid.drv/window.c
++++ b/dlls/wineandroid.drv/window.c
+@@ -975,7 +975,7 @@ BOOL ANDROID_CreateWindow( HWND hwnd )
+     {
+         struct android_win_data *data;
+ 
+-        init_event_queue();
++        if (!desktop_tid) init_event_queue();
+         start_android_device();
+         if (!(data = alloc_win_data( hwnd ))) return FALSE;
+         release_win_data( data );
+@@ -1240,6 +1240,9 @@ BOOL has_client_surface( HWND hwnd )
+  */
+ BOOL ANDROID_CreateDesktop( const WCHAR *name, UINT width, UINT height )
+ {
++    /* the desktop window does not exist yet, so initialize the queue here */
++    if (!desktop_tid) init_event_queue();
++
+     /* wait until we receive the surface changed event */
+     while (!screen_width)
+     {
