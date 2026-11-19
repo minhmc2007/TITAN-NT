@@ -99,6 +99,7 @@ static void *replace_android_dlopen_ext(const char *path, int flags,
 static void *replace_dlopen(const char *path, int flags);
 static int hosts_hwui(void);
 static void install_crash_trace(void);
+static int install_mutex_trace(void);
 
 /* Match by address: the shim is also installed as libvulkan.so. */
 static int object_phdr(struct dl_phdr_info *info, size_t size, void *data)
@@ -605,6 +606,8 @@ static void init_once(void)
     atomic_fetch_or_explicit(&g_state, STATE_HOOK_INSTALLED, memory_order_relaxed);
     __android_log_print(ANDROID_LOG_INFO, TAG, "%s ready, ui_process=%d", PLATFORM_LOADER,
                         g_ui_process);
+    if (g_ui_process && install_mutex_trace() != 0)
+        __android_log_print(ANDROID_LOG_WARN, TAG, "mutex trace not installed");
 }
 
 static void ensure_ready(void)
@@ -687,6 +690,137 @@ static void install_crash_trace(void)
     sigemptyset(&action.sa_mask);
     sigaction(SIGABRT, &action, NULL);
     sigaction(SIGILL, &action, NULL);
+}
+
+/* Every object that imports pthread_mutex_destroy gets the tracer, so the
+ * destroy site of the mutex that later aborts the render thread is known. */
+static int (*g_real_mutex_destroy)(pthread_mutex_t *);
+static _Atomic int g_mutex_trace_lines;
+static _Atomic int g_mutex_trace_busy;
+
+__attribute__((noinline, used))
+static int mutex_destroy_log(void *mutex, uintptr_t fp, uintptr_t ra)
+{
+    int line;
+    int i;
+
+    if (atomic_exchange_explicit(&g_mutex_trace_busy, 1, memory_order_acquire))
+        return g_real_mutex_destroy((pthread_mutex_t *)mutex);
+
+    line = atomic_fetch_add_explicit(&g_mutex_trace_lines, 1, memory_order_relaxed);
+    if (line < 512) {
+        int fd = open("/data/user/0/dev.titan.nt/files/mutex.txt",
+                      O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
+
+        if (fd >= 0) {
+            dprintf(fd, "destroy %p tid %d\n", mutex, gettid());
+            write_frame(fd, ra - 4);
+            for (i = 0; i < 16 && fp != 0 && (fp & 15) == 0; i++) {
+                uintptr_t next = *(uintptr_t *)fp;
+                uintptr_t ret = *(uintptr_t *)(fp + 8);
+
+                if (ret != 0)
+                    write_frame(fd, ret - 4);
+                if (next <= fp || next - fp > (1u << 20))
+                    break;
+                fp = next;
+            }
+            close(fd);
+        }
+        __android_log_print(ANDROID_LOG_INFO, TAG, "mutex destroy %p tid %d caller %#" PRIxPTR,
+                            mutex, gettid(), ra - 4);
+    }
+    atomic_store_explicit(&g_mutex_trace_busy, 0, memory_order_release);
+    return g_real_mutex_destroy((pthread_mutex_t *)mutex);
+}
+
+/* Bare so x29 and x30 still belong to the caller: the destroy site is inside
+ * the caller's own frame chain. */
+__attribute__((naked, noinline, used))
+static void mutex_destroy_hook(void)
+{
+    __asm__ volatile(
+        "mov x1, x29\n"
+        "mov x2, x30\n"
+        "b mutex_destroy_log\n");
+}
+
+static int patch_mutex_object(struct dl_phdr_info *info, size_t size, void *data)
+{
+    struct loaded_object obj = {0};
+    const Elf64_Dyn *dynamic = NULL;
+    Elf64_Addr strtab_value = 0, symtab_value = 0, jmprel_value = 0, rela_value = 0;
+    Elf64_Xword pltrelsz = 0, relasz = 0;
+    uintptr_t strtab, symtab, table[2];
+    size_t table_size[2];
+    unsigned *patched = data;
+
+    (void)size;
+    obj.phdr = info->dlpi_phdr;
+    obj.phnum = info->dlpi_phnum;
+    obj.base = info->dlpi_addr;
+    for (size_t i = 0; i < obj.phnum; i++) {
+        if (obj.phdr[i].p_type == PT_DYNAMIC) {
+            dynamic = (const Elf64_Dyn *)(obj.base + obj.phdr[i].p_vaddr);
+            break;
+        }
+    }
+    if (dynamic == NULL)
+        return 0;
+
+    for (const Elf64_Dyn *d = dynamic; d->d_tag != DT_NULL; d++) {
+        switch (d->d_tag) {
+        case DT_STRTAB: strtab_value = d->d_un.d_ptr; break;
+        case DT_SYMTAB: symtab_value = d->d_un.d_ptr; break;
+        case DT_JMPREL: jmprel_value = d->d_un.d_ptr; break;
+        case DT_PLTRELSZ: pltrelsz = d->d_un.d_val; break;
+        case DT_RELA: rela_value = d->d_un.d_ptr; break;
+        case DT_RELASZ: relasz = d->d_un.d_val; break;
+        default: break;
+        }
+    }
+    strtab = object_pointer(&obj, strtab_value);
+    symtab = object_pointer(&obj, symtab_value);
+    if (strtab == 0 || symtab == 0)
+        return 0;
+    table[0] = object_pointer(&obj, jmprel_value);
+    table_size[0] = (size_t)pltrelsz;
+    table[1] = object_pointer(&obj, rela_value);
+    table_size[1] = (size_t)relasz;
+
+    for (int t = 0; t < 2; t++) {
+        for (size_t offset = 0; table[t] != 0 &&
+             offset + sizeof(Elf64_Rela) <= table_size[t]; offset += sizeof(Elf64_Rela)) {
+            const Elf64_Rela *rel = (const Elf64_Rela *)(table[t] + offset);
+            const Elf64_Sym *sym;
+            const char *name;
+            unsigned type = ELF64_R_TYPE(rel->r_info);
+
+            if (type != R_AARCH64_JUMP_SLOT && type != R_AARCH64_GLOB_DAT)
+                continue;
+            sym = (const Elf64_Sym *)(symtab + ELF64_R_SYM(rel->r_info) *
+                                      sizeof(Elf64_Sym));
+            name = (const char *)(strtab + sym->st_name);
+            if (strcmp(name, "pthread_mutex_destroy") == 0 &&
+                patch_slot(&obj, obj->base + rel->r_offset,
+                           (void *)(uintptr_t)mutex_destroy_hook) == 0)
+                (*patched)++;
+        }
+    }
+    return 0;
+}
+
+static int install_mutex_trace(void)
+{
+    unsigned patched = 0;
+
+    g_real_mutex_destroy =
+        (int (*)(pthread_mutex_t *))dlsym(RTLD_DEFAULT, "pthread_mutex_destroy");
+    if (g_real_mutex_destroy == NULL)
+        return -1;
+    dl_iterate_phdr(patch_mutex_object, &patched);
+    __android_log_print(ANDROID_LOG_INFO, TAG, "mutex trace on %u slots", patched);
+    return patched != 0 ? 0 : -1;
 }
 
 /* HWUI in an Android UI process holds the vendor driver; a second client there
