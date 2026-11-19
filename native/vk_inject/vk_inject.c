@@ -802,7 +802,7 @@ static int patch_mutex_object(struct dl_phdr_info *info, size_t size, void *data
                                       sizeof(Elf64_Sym));
             name = (const char *)(strtab + sym->st_name);
             if (strcmp(name, "pthread_mutex_destroy") == 0 &&
-                patch_slot(&obj, obj->base + rel->r_offset,
+                patch_slot(&obj, obj.base + rel->r_offset,
                            (void *)(uintptr_t)mutex_destroy_hook) == 0)
                 (*patched)++;
         }
