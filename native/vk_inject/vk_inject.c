@@ -659,6 +659,8 @@ static void crash_handler(int sig, siginfo_t *info, void *ctx)
             close(comm_fd);
         }
         dprintf(fd, "signal %d tid %d comm %s\n", sig, gettid(), comm);
+        dprintf(fd, "mutex ");
+        write_frame(fd, uc->uc_mcontext.regs[0]);
         write_frame(fd, uc->uc_mcontext.pc);
         write_frame(fd, uc->uc_mcontext.regs[30]);
         for (i = 0; i < 32 && fp > sp && fp < sp + (8u << 20); i++) {
