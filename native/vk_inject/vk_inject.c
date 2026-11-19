@@ -100,6 +100,7 @@ static void *replace_dlopen(const char *path, int flags);
 static int hosts_hwui(void);
 static void install_crash_trace(void);
 static int install_trace(void);
+static void probe_ntdll(void);
 
 /* Match by address: the shim is also installed as libvulkan.so. */
 static int object_phdr(struct dl_phdr_info *info, size_t size, void *data)
@@ -608,6 +609,26 @@ static void init_once(void)
                         g_ui_process);
     if (g_ui_process && install_trace() != 0)
         __android_log_print(ANDROID_LOG_WARN, TAG, "trace not installed");
+    if (g_ui_process)
+        probe_ntdll();
+}
+
+/* The driver's unixlib dlopens ntdll.so by soname, which only resolves when
+ * the linker's search path was updated at process start. */
+static void probe_ntdll(void)
+{
+    static const char absolute[] =
+        "/data/user/0/dev.titan.nt/files/wine/arm64-v8a/lib/wine/aarch64-unix/ntdll.so";
+    void *handle = dlopen("ntdll.so", RTLD_NOW);
+
+    __android_log_print(ANDROID_LOG_INFO, TAG, "probe soname %p %s", handle,
+                        handle ? "ok" : dlerror());
+    handle = dlopen(absolute, RTLD_NOW);
+    __android_log_print(ANDROID_LOG_INFO, TAG, "probe absolute %p %s", handle,
+                        handle ? "ok" : dlerror());
+    if (handle)
+        __android_log_print(ANDROID_LOG_INFO, TAG, "probe java_vm %p java_object %p",
+                            dlsym(handle, "java_vm"), dlsym(handle, "java_object"));
 }
 
 static void ensure_ready(void)
