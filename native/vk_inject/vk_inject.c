@@ -99,7 +99,7 @@ static void *replace_android_dlopen_ext(const char *path, int flags,
 static void *replace_dlopen(const char *path, int flags);
 static int hosts_hwui(void);
 static void install_crash_trace(void);
-static int install_mutex_trace(void);
+static int install_trace(void);
 
 /* Match by address: the shim is also installed as libvulkan.so. */
 static int object_phdr(struct dl_phdr_info *info, size_t size, void *data)
@@ -606,8 +606,8 @@ static void init_once(void)
     atomic_fetch_or_explicit(&g_state, STATE_HOOK_INSTALLED, memory_order_relaxed);
     __android_log_print(ANDROID_LOG_INFO, TAG, "%s ready, ui_process=%d", PLATFORM_LOADER,
                         g_ui_process);
-    if (g_ui_process && install_mutex_trace() != 0)
-        __android_log_print(ANDROID_LOG_WARN, TAG, "mutex trace not installed");
+    if (g_ui_process && install_trace() != 0)
+        __android_log_print(ANDROID_LOG_WARN, TAG, "trace not installed");
 }
 
 static void ensure_ready(void)
@@ -675,6 +675,18 @@ static void crash_handler(int sig, siginfo_t *info, void *ctx)
                 break;
             fp = next;
         }
+        {
+            int maps = open("/proc/self/maps", O_RDONLY | O_CLOEXEC);
+
+            if (maps >= 0) {
+                char buf[8192];
+                ssize_t n;
+
+                while ((n = read(maps, buf, sizeof(buf))) > 0)
+                    (void)!write(fd, buf, (size_t)n);
+                close(maps);
+            }
+        }
         close(fd);
     }
     _exit(70);
@@ -692,28 +704,45 @@ static void install_crash_trace(void)
     sigaction(SIGILL, &action, NULL);
 }
 
-/* Every object that imports pthread_mutex_destroy gets the tracer, so the
- * destroy site of the mutex that later aborts the render thread is known. */
-static int (*g_real_mutex_destroy)(pthread_mutex_t *);
-static _Atomic int g_mutex_trace_lines;
-static _Atomic int g_mutex_trace_busy;
+/* Wine's exit runs the process-wide C++ destructors while the render thread
+ * still draws; record both call sites to see which comes first. */
+struct trace_import {
+    const char *name;
+    void *target;
+    unsigned patched;
+};
 
-__attribute__((noinline, used))
-static int mutex_destroy_log(void *mutex, uintptr_t fp, uintptr_t ra)
+static int (*g_real_mutex_destroy)(pthread_mutex_t *);
+static void (*g_real_exit)(int);
+static _Atomic int g_trace_lines;
+static _Atomic int g_trace_busy;
+
+static void log_frames(const char *what, void *object, uintptr_t fp, uintptr_t ra)
 {
+    char path[64];
     int line;
     int i;
 
-    if (atomic_exchange_explicit(&g_mutex_trace_busy, 1, memory_order_acquire))
-        return g_real_mutex_destroy((pthread_mutex_t *)mutex);
-
-    line = atomic_fetch_add_explicit(&g_mutex_trace_lines, 1, memory_order_relaxed);
+    if (atomic_exchange_explicit(&g_trace_busy, 1, memory_order_acquire))
+        return;
+    line = atomic_fetch_add_explicit(&g_trace_lines, 1, memory_order_relaxed);
     if (line < 512) {
-        int fd = open("/data/user/0/dev.titan.nt/files/mutex.txt",
+        char comm[32] = {0};
+        int fd = open("/data/user/0/dev.titan.nt/files/trace.txt",
                       O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
 
+        snprintf(path, sizeof(path), "/proc/self/task/%d/comm", gettid());
         if (fd >= 0) {
-            dprintf(fd, "destroy %p tid %d\n", mutex, gettid());
+            int comm_fd = open(path, O_RDONLY | O_CLOEXEC);
+
+            if (comm_fd >= 0) {
+                (void)!read(comm_fd, comm, sizeof(comm) - 1);
+                close(comm_fd);
+            }
+            for (i = 0; comm[i] != '\0'; i++)
+                if (comm[i] == '\n')
+                    comm[i] = '\0';
+            dprintf(fd, "%s %p tid %d comm %s\n", what, object, gettid(), comm);
             write_frame(fd, ra - 4);
             for (i = 0; i < 16 && fp != 0 && (fp & 15) == 0; i++) {
                 uintptr_t next = *(uintptr_t *)fp;
@@ -727,15 +756,20 @@ static int mutex_destroy_log(void *mutex, uintptr_t fp, uintptr_t ra)
             }
             close(fd);
         }
-        __android_log_print(ANDROID_LOG_INFO, TAG, "mutex destroy %p tid %d caller %#" PRIxPTR,
-                            mutex, gettid(), ra - 4);
+        __android_log_print(ANDROID_LOG_INFO, TAG, "%s %p tid %d", what, object, gettid());
     }
-    atomic_store_explicit(&g_mutex_trace_busy, 0, memory_order_release);
+    atomic_store_explicit(&g_trace_busy, 0, memory_order_release);
+}
+
+__attribute__((noinline, used))
+static int mutex_destroy_log(void *mutex, uintptr_t fp, uintptr_t ra)
+{
+    log_frames("destroy", mutex, fp, ra);
     return g_real_mutex_destroy((pthread_mutex_t *)mutex);
 }
 
-/* Bare so x29 and x30 still belong to the caller: the destroy site is inside
- * the caller's own frame chain. */
+/* Bare so x29 and x30 still belong to the caller: the call site is inside the
+ * caller's own frame chain. */
 __attribute__((naked, noinline, used))
 static void mutex_destroy_hook(void)
 {
@@ -745,15 +779,31 @@ static void mutex_destroy_hook(void)
         "b mutex_destroy_log\n");
 }
 
-static int patch_mutex_object(struct dl_phdr_info *info, size_t size, void *data)
+__attribute__((noinline, used))
+static void exit_log(void *status, uintptr_t fp, uintptr_t ra)
 {
+    log_frames("exit", status, fp, ra);
+    g_real_exit((int)(uintptr_t)status);
+}
+
+__attribute__((naked, noinline, used))
+static void exit_hook(void)
+{
+    __asm__ volatile(
+        "mov x1, x29\n"
+        "mov x2, x30\n"
+        "b exit_log\n");
+}
+
+static int patch_trace_object(struct dl_phdr_info *info, size_t size, void *data)
+{
+    struct trace_import *import = data;
     struct loaded_object obj = {0};
     const Elf64_Dyn *dynamic = NULL;
     Elf64_Addr strtab_value = 0, symtab_value = 0, jmprel_value = 0, rela_value = 0;
     Elf64_Xword pltrelsz = 0, relasz = 0;
     uintptr_t strtab, symtab, table[2];
     size_t table_size[2];
-    unsigned *patched = data;
 
     (void)size;
     obj.phdr = info->dlpi_phdr;
@@ -801,26 +851,31 @@ static int patch_mutex_object(struct dl_phdr_info *info, size_t size, void *data
             sym = (const Elf64_Sym *)(symtab + ELF64_R_SYM(rel->r_info) *
                                       sizeof(Elf64_Sym));
             name = (const char *)(strtab + sym->st_name);
-            if (strcmp(name, "pthread_mutex_destroy") == 0 &&
-                patch_slot(&obj, obj.base + rel->r_offset,
-                           (void *)(uintptr_t)mutex_destroy_hook) == 0)
-                (*patched)++;
+            if (strcmp(name, import->name) == 0 &&
+                patch_slot(&obj, obj.base + rel->r_offset, import->target) == 0)
+                import->patched++;
         }
     }
     return 0;
 }
 
-static int install_mutex_trace(void)
+static int install_trace(void)
 {
-    unsigned patched = 0;
+    struct trace_import imports[] = {
+        { "pthread_mutex_destroy", (void *)(uintptr_t)mutex_destroy_hook, 0 },
+        { "exit", (void *)(uintptr_t)exit_hook, 0 },
+    };
 
     g_real_mutex_destroy =
         (int (*)(pthread_mutex_t *))dlsym(RTLD_DEFAULT, "pthread_mutex_destroy");
-    if (g_real_mutex_destroy == NULL)
+    g_real_exit = (void (*)(int))dlsym(RTLD_DEFAULT, "exit");
+    if (g_real_mutex_destroy == NULL || g_real_exit == NULL)
         return -1;
-    dl_iterate_phdr(patch_mutex_object, &patched);
-    __android_log_print(ANDROID_LOG_INFO, TAG, "mutex trace on %u slots", patched);
-    return patched != 0 ? 0 : -1;
+    for (size_t i = 0; i < sizeof(imports) / sizeof(imports[0]); i++)
+        dl_iterate_phdr(patch_trace_object, &imports[i]);
+    __android_log_print(ANDROID_LOG_INFO, TAG, "trace on %u destroy and %u exit slots",
+                        imports[0].patched, imports[1].patched);
+    return imports[0].patched != 0 && imports[1].patched != 0 ? 0 : -1;
 }
 
 /* HWUI in an Android UI process holds the vendor driver; a second client there
