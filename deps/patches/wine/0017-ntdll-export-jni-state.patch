@@ -1,0 +1,43 @@
+From: TITAN-NT <titan@localhost>
+Date: Wed, 19 Nov 2026 16:20:00 +0700
+Subject: [PATCH] ntdll: Export the JNI state to the Android driver.
+
+Unix libraries are compiled with -fvisibility=hidden, so wineandroid.drv's
+dlsym( "java_vm" ) returned NULL and android_init dereferenced it, which made
+LoadLibraryW( wineandroid.drv ) fail with ERROR_DLL_INIT_FAILED. JNI_OnLoad is
+visible only because jni.h declares it with default visibility.
+---
+diff --git a/dlls/ntdll/unix/loader.c b/dlls/ntdll/unix/loader.c
+index f8aa468..85dd919 100644
+--- a/dlls/ntdll/unix/loader.c
++++ b/dlls/ntdll/unix/loader.c
+@@ -2470,9 +2470,10 @@ static void start_main_thread(void)
+ #define WINE_JAVA_CLASS "org/winehq/wine/WineActivity"
+ #endif
+ 
+-JavaVM *java_vm = NULL;
+-jobject java_object = 0;
+-unsigned short java_gdt_sel = 0;
++/* found by dlsym() in wineandroid.drv */
++__attribute__((visibility("default"))) JavaVM *java_vm = NULL;
++__attribute__((visibility("default"))) jobject java_object = 0;
++__attribute__((visibility("default"))) unsigned short java_gdt_sel = 0;
+ 
+ /* main Wine initialisation */
+ static jstring wine_init_jni( JNIEnv *env, jobject obj, jobjectArray cmdline, jobjectArray environment )
+diff --git a/dlls/wineandroid.drv/init.c b/dlls/wineandroid.drv/init.c
+index e9aacf8..c24ffaa 100644
+--- a/dlls/wineandroid.drv/init.c
++++ b/dlls/wineandroid.drv/init.c
+@@ -531,6 +531,11 @@ static HRESULT android_init( void *arg )
+     p_java_vm = dlsym( ntdll, "java_vm" );
+     p_java_object = dlsym( ntdll, "java_object" );
+     p_java_gdt_sel = dlsym( ntdll, "java_gdt_sel" );
++    if (!p_java_vm || !p_java_object)
++    {
++        ERR( "ntdll.so does not export the JNI state\n" );
++        return STATUS_UNSUCCESSFUL;
++    }
+ 
+     object = *p_java_object;
+ 

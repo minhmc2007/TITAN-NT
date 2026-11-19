@@ -152,12 +152,22 @@ jobs:
           command -v ccache >/dev/null && ccache --show-stats
           mkdir -p dist
           tar -C build/wine/install -I 'zstd -T0 -6' -cf dist/wine-aarch64.tar.zst .
+          tar -C build/wine/install -I 'zstd -T0' -cf dist/wine-driver.tar.zst \
+            lib/wine/aarch64-unix/ntdll.so lib/wine/aarch64-unix/wineandroid.so \
+            lib/wine/aarch64-windows/wineandroid.drv
           ls -l dist/
 
       - uses: actions/upload-artifact@v7
         with:
           name: wine-aarch64
           path: dist/wine-aarch64.tar.zst
+          if-no-files-found: error
+          retention-days: 30
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wine-driver
+          path: dist/wine-driver.tar.zst
           if-no-files-found: error
           retention-days: 30
 
